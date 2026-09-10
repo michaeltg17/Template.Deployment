@@ -107,7 +107,7 @@ resource "azurerm_role_assignment" "cd_reader" {
 }
 
 resource "azurerm_role_assignment" "cd_aks" {
-  scope                = azurerm_kubernetes_cluster.this.id
+  scope = azurerm_kubernetes_cluster.this.id
   # Grants the CD identity `Microsoft.ContainerService/managedClusters/accessProfiles/*`
   # (via the AKS Contributor role) so the deploy workflow can run
   # `az aks get-credentials` and fetch the kubeconfig.
