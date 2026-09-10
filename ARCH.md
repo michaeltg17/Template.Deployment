@@ -43,7 +43,35 @@ Deployment of the template project in **two clouds: AWS and Azure**, managed end
            │       RDS PostgreSQL         │
            │          Multi-AZ            │
            │          Private             │
-           └──────────────────────────────┘
+            └──────────────────────────────┘
+```
+
+Network layout (VPC + AZs):
+
+```
+ ┌──────────────────────── AWS VPC 10.0.0.0/16 ─────────────────────────┐
+ │                                                                     │
+ │    AZ-a                   AZ-b                   AZ-c               │
+ │ ┌──────────────┐         ┌──────────────┐         ┌──────────────┐  │
+ │ │    Public    │         │    Public    │         │    Public    │  │
+ │ │ 10.0.1.0/24  │         │ 10.0.2.0/24  │         │ 10.0.3.0/24  │  │
+ │ │  ALB + NAT   │         │     ALB      │         │     ALB      │  │
+ │ └──────────────┘         └──────────────┘         └──────────────┘  │
+ │                                                                     │
+ │ ┌──────────────┐         ┌──────────────┐         ┌──────────────┐  │
+ │ │   Private    │         │   Private    │         │   Private    │  │
+ │ │ 10.0.10.0/23 │         │ 10.0.12.0/23 │         │ 10.0.14.0/23 │  │
+ │ │  EKS Nodes   │         │  EKS Nodes   │         │  EKS Nodes   │  │
+ │ │  API / Next  │         │  API / Next  │         │  API / Next  │  │
+ │ └──────────────┘         └──────────────┘         └──────────────┘  │
+ │                                                                     │
+ │                    ┌────────────────────────┐                       │
+ │                    │   RDS Private Subnets  │                       │
+ │                    │                        │                       │
+ │                    │ PostgreSQL Multi-AZ    │                       │
+ │                    └────────────────────────┘                       │
+ │                                                                     │
+ └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Azure (AKS + App Gateway + PostgreSQL Flexible)
@@ -83,7 +111,29 @@ Deployment of the template project in **two clouds: AWS and Azure**, managed end
            │  PostgreSQL Flexible Server  │
            │       B_Standard_B1ms        │
            │      Private (VNet + DNS)    │
-           └──────────────────────────────┘
+            └──────────────────────────────┘
+```
+
+Network layout (VNet + subnets; dev is single-region, one zone):
+
+```
+ ┌──────────────────────── Azure VNet 10.0.0.0/16 ───────────────────────┐
+ │                                                                       │
+ │    centralus (single region; dev uses one availability zone)          │
+ │                                                                       │
+ │   ┌────────────────┐  ┌────────────────┐  ┌────────────────┐         │
+ │   │ App Gateway    │  │    Nodes       │  │  PostgreSQL    │         │
+ │   │ Subnet         │  │    Subnet      │  │  Subnet        │         │
+ │   │ 10.0.0.0/24    │  │ 10.0.1.0/24    │  │ 10.0.2.0/24    │         │
+ │   │                │  │                │  │                │         │
+ │   │ public         │  │ private        │  │ private        │         │
+ │   │ delegated      │  │                │  │ delegated      │         │
+ │   │                │  │ AKS nodes +    │  │                │         │
+ │   │ App Gateway    │  │ pods (CNI)     │  │ PostgreSQL     │         │
+ │   │ Standard_v2    │  │ API / React    │  │ Flexible       │         │
+ │   └────────────────┘  └────────────────┘  └────────────────┘         │
+ │                                                                       │
+ └───────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Repo layout
