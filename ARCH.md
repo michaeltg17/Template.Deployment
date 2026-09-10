@@ -29,12 +29,12 @@ Deployment of the template project in **two clouds: AWS and Azure**, managed end
                /api/*│                         │ /
                      ▼                         ▼
            ┌────────────────┐        ┌────────────────┐
-           │  API Service   │        │ Next.js Service│
+           │  API Service   │        │  React Service │
            └───────┬────────┘        └───────┬────────┘
                    │                         │
                    ▼                         ▼
            ┌────────────────┐        ┌────────────────┐
-           │    API Pods    │        │  Next.js Pods  │
+           │    API Pods    │        │   React Pods   │
            └───────┬────────┘        └────────────────┘
                    │
                    │ PostgreSQL :5432
@@ -43,7 +43,7 @@ Deployment of the template project in **two clouds: AWS and Azure**, managed end
            │       RDS PostgreSQL         │
            │          Multi-AZ            │
            │          Private             │
-            └──────────────────────────────┘
+           └──────────────────────────────┘
 ```
 
 Network layout (VPC + AZs):
@@ -62,7 +62,7 @@ Network layout (VPC + AZs):
  │ │   Private    │         │   Private    │         │   Private    │  │
  │ │ 10.0.10.0/23 │         │ 10.0.12.0/23 │         │ 10.0.14.0/23 │  │
  │ │  EKS Nodes   │         │  EKS Nodes   │         │  EKS Nodes   │  │
- │ │  API / Next  │         │  API / Next  │         │  API / Next  │  │
+ │ │  API / React │         │  API / React │         │  API / React │  │
  │ └──────────────┘         └──────────────┘         └──────────────┘  │
  │                                                                     │
  │                    ┌────────────────────────┐                       │
@@ -110,7 +110,7 @@ Network layout (VPC + AZs):
            ┌──────────────────────────────┐
            │  PostgreSQL Flexible Server  │
            │       B_Standard_B1ms        │
-           │      Private (VNet + DNS)    │
+            │      Private (VNet + DNS)    │
             └──────────────────────────────┘
 ```
 
@@ -280,7 +280,7 @@ The two clouds differ only in the ingress (ALB annotations vs. the AGIC `Ingress
 
    ```sh
    curl http://<ALB-DNS>/api/    # api through the ALB
-   curl http://<ALB-DNS>/        # Next.js through the ALB
+   curl http://<ALB-DNS>/        # React through the ALB
    ```
 
 ### Deploy a new build (manual CD)
