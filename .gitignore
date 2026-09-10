@@ -442,3 +442,4 @@ azure/terraform/**/.terraform.tfstate.lock.info
 
 # Deploy values (per-env, non-secret + secrets) - fill from *.env.example
 common/k8s/environments/*.env
+opencode.json
