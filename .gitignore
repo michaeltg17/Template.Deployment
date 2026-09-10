@@ -428,12 +428,17 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
-# Terraform (per-environment state + local values)
-terraform/**/.terraform/
-terraform/**/terraform.tfstate
-terraform/**/terraform.tfstate.*
-terraform/**/terraform.tfvars
-terraform/**/.terraform.tfstate.lock.info
+# Terraform (per-environment state + local values) - aws + azure
+aws/terraform/**/.terraform/
+aws/terraform/**/terraform.tfstate
+aws/terraform/**/terraform.tfstate.*
+aws/terraform/**/terraform.tfvars
+aws/terraform/**/.terraform.tfstate.lock.info
+azure/terraform/**/.terraform/
+azure/terraform/**/terraform.tfstate
+azure/terraform/**/terraform.tfstate.*
+azure/terraform/**/terraform.tfvars
+azure/terraform/**/.terraform.tfstate.lock.info
 
 # Deploy values (per-env, non-secret + secrets) - fill from *.env.example
-k8s/environments/*.env
+common/k8s/environments/*.env

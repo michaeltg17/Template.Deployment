@@ -14,8 +14,8 @@
 set -euo pipefail
 
 ENV_NAME="${1:-dev}"
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TF_DIR="$REPO_ROOT/terraform/environments/$ENV_NAME"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+TF_DIR="$REPO_ROOT/aws/terraform/environments/$ENV_NAME"
 
 [ -d "$TF_DIR" ] || { echo "ERROR: missing $TF_DIR"; exit 1; }
 command -v aws >/dev/null 2>&1 || { echo "ERROR: aws CLI not found in PATH"; exit 1; }

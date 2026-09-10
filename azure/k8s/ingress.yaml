@@ -1,0 +1,37 @@
+# Single entry point. /api/* goes to the API, everything else to the Next.js
+# app. The App Gateway itself (public, :80, its own delegated subnet) is created
+# by Terraform (azure/terraform) and managed by AGIC from this Ingress - see
+# bootstrap/setup-aks.sh. The app URL is the App Gateway DNS name in
+# `terraform output -raw appgateway_fqdn` (no domain in dev).
+#
+# AGIC picks this Ingress up via the azure-application-gateway ingress class and
+# rewrites the App Gateway routing (listeners, rules, backend pools) from it.
+# The App Gateway health probe is derived from the pod's httpGet readiness probe
+# (already /health/ready in common/k8s/api.yaml), so no extra annotation is
+# needed - unlike the AWS ALB, which defaults its probe to /.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: app
+  namespace: app
+  labels:
+    app: app
+spec:
+  ingressClassName: azure-application-gateway
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: react
+                port:
+                  number: 80

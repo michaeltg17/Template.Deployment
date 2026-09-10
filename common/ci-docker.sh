@@ -10,7 +10,7 @@ export MSYS_NO_PATHCONV=1
 IMAGE="template-deployment-ci"
 
 echo "Building CI image..."
-docker build -f Dockerfile.ci -t "$IMAGE" .
+docker build -f common/Dockerfile.ci -t "$IMAGE" .
 
 echo "Running CI checks in docker..."
 docker run --rm \

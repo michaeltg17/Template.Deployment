@@ -31,5 +31,5 @@ RUN curl -sSfL \
 
 WORKDIR /app
 
-# The workspace (including this ci.sh) is mounted at /app at runtime.
-CMD ["bash", "ci.sh"]
+# The workspace (including common/ci.sh) is mounted at /app at runtime.
+CMD ["bash", "common/ci.sh"]
