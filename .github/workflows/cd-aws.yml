@@ -1,7 +1,7 @@
 # Manual continuous deployment: deploys the app repos' (Template.Api, Template.React)
 # image tags to an EKS environment. The app repos build and push ghcr images
 # themselves (tagged <sha7> + latest); this workflow picks the sha7 of the
-# app repos' main HEAD (or an explicit override) and runs k8s/deploy.sh.
+# app repos' main HEAD (or an explicit override) and runs common/k8s/deploy.sh.
 #
 # Trigger: Actions tab -> "Deploy" -> choose env (optionally pin tags) -> Run.
 #
@@ -20,7 +20,7 @@
 #            IMAGE_API_KEY_<ENV>
 #   vars:    IMAGE_API_URL_<ENV>  (image API base URL for that env)
 
-name: Deploy
+name: Deploy (AWS)
 
 on:
   workflow_dispatch:
@@ -109,8 +109,8 @@ jobs:
             -e "s|^API_IMAGE_TAG=.*|API_IMAGE_TAG=$API_TAG|" \
             -e "s|^MIGRATIONS_IMAGE_TAG=.*|MIGRATIONS_IMAGE_TAG=$API_TAG|" \
             -e "s|^REACT_IMAGE_TAG=.*|REACT_IMAGE_TAG=$REACT_TAG|" \
-            "k8s/environments/$ENV_NAME.env.example" > "k8s/environments/$ENV_NAME.env"
-          printf 'DB_PASSWORD=%s\nIMAGE_API_KEY=%s\n' "$DB_PASSWORD" "$IMAGE_API_KEY" > "k8s/environments/$ENV_NAME.secrets.env"
+            "common/k8s/environments/$ENV_NAME.env.example" > "common/k8s/environments/$ENV_NAME.env"
+          printf 'DB_PASSWORD=%s\nIMAGE_API_KEY=%s\n' "$DB_PASSWORD" "$IMAGE_API_KEY" > "common/k8s/environments/$ENV_NAME.secrets.env"
 
       - name: Configure kubectl (EKS)
         run: |
@@ -119,4 +119,4 @@ jobs:
           kubectl get nodes
 
       - name: Deploy
-        run: bash k8s/deploy.sh "$ENV_NAME"
+        run: bash common/k8s/deploy.sh "$ENV_NAME" aws

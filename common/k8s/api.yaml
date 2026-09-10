@@ -58,13 +58,19 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: image-api-key
+          # Readiness gates traffic and, on azure, drives the App Gateway health
+          # probe (AGIC uses the pod's httpGet readiness path). It must confirm
+          # the API is up AND can reach the DB. On aws the ALB health check is
+          # set separately via a Service annotation added by deploy.sh.
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /health/ready
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /health/live
               port: 8080
             initialDelaySeconds: 60
             periodSeconds: 20
@@ -82,10 +88,6 @@ metadata:
   namespace: app
   labels:
     app: api
-  annotations:
-    # ALB health check for this backend: the API has no route at / (404),
-    # /api/products is the cheapest 200 (also exercises the DB).
-    alb.ingress.kubernetes.io/healthcheck-path: /api/products
 spec:
   type: ClusterIP
   selector:

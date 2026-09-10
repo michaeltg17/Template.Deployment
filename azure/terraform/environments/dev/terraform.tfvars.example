@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and fill in:  cp terraform.tfvars.example terraform.tfvars
+# terraform.tfvars is gitignored.
+
+# PostgreSQL Flexible Server admin password. MUST equal DB_PASSWORD in
+# common/k8s/environments/dev.secrets.env and the DB_PASSWORD_DEV GitHub secret.
+db_admin_password = ""
