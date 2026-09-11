@@ -38,3 +38,52 @@ When creating or updating the `dev` → `main` PR:
 3. Check if a PR already exists (use `github_list_pull_requests`).
 4. If none exists, create one with an accurate title and description summarizing the changes.
 5. If one exists, update its title and description to reflect the actual current diff.
+
+## AWS Guidance
+
+- Prefer the AWS MCP Server for AWS interactions — it provides sandboxed
+  execution, observability, and audit logging. If unavailable, use the
+  AWS CLI directly.
+- Before starting a task, check whether a relevant AWS skill is available.
+  Load the skill with `retrieve_skill` and prefer its guidance over
+  general knowledge.
+- When uncertain about specific AWS details (API parameters, permissions,
+  limits, error codes), verify against documentation rather than guessing.
+  State uncertainty explicitly if you cannot confirm.
+- When creating infrastructure, prefer infrastructure-as-code (AWS CDK or
+  CloudFormation) over direct CLI commands.
+- When working with infrastructure, follow AWS Well-Architected Framework
+  principles.
+- Do not use em dashes in AWS resource names or descriptions. Use
+  hyphens instead.
+
+### Secret Safety
+
+- MUST load the `aws-secrets-manager` skill first for any secret,
+  credential, API key, token, or password task. MUST NOT call
+  `secretsmanager get-secret-value` or `batch-get-secret-value`, and MUST
+  NOT hit the Secrets Manager Agent daemon directly. MUST use
+  `{{resolve:secretsmanager:secret-id:SecretString:json-key}}` with
+  `asm-exec` so the secret resolves at runtime without entering context.
+
+## Azure Guidance
+
+- Prefer the Azure MCP Server for Azure interactions - it provides
+  structured tool-backed access to Azure resources. If unavailable, use
+  the Azure CLI (`az`) directly.
+- Before starting an Azure task, check whether a relevant Azure skill is
+  available (azure-prepare, azure-validate, azure-deploy, azure-cost,
+  azure-diagnostics, ...). Load the skill with the `skill` tool and prefer
+  its guidance over general knowledge.
+- For app deployments, follow the azure-prepare -> azure-validate ->
+  azure-deploy flow; run deployments through `azd` (azd up / azd deploy),
+  not raw `az` commands.
+- When creating infrastructure, prefer infrastructure-as-code (Bicep or
+  Terraform via azd) over direct `az` commands.
+- When uncertain about specific Azure details (parameters, limits, error
+  codes), verify against Microsoft documentation rather than guessing.
+  State uncertainty explicitly if you cannot confirm.
+- Use Azure naming conventions; do not use special characters in resource
+  names.
+- Destructive actions (deleting resource groups, stopping production
+  resources) require explicit user confirmation first.
