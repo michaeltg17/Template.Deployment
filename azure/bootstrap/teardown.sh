@@ -24,6 +24,11 @@ TF_DIR="$REPO_ROOT/azure/terraform/environments/$ENV_NAME"
 [ -d "$TF_DIR" ] || { echo "ERROR: missing $TF_DIR"; exit 1; }
 command -v terraform >/dev/null 2>&1 || { echo "ERROR: terraform not found in PATH"; exit 1; }
 
+# Ensure the remote backend is initialized so the outputs below resolve even on
+# a fresh checkout (idempotent: a fast no-op when already initialized).
+echo "==> terraform init (connect to the remote state backend)"
+terraform -chdir="$TF_DIR" init
+
 tfout() { terraform -chdir="$TF_DIR" output -raw "$1"; }
 
 CLUSTER_NAME="${CLUSTER_NAME:-$(tfout aks_name)}"
@@ -35,14 +40,44 @@ cluster_reachable() {
     az aks show -n "$CLUSTER_NAME" -g "$RESOURCE_GROUP" >/dev/null 2>&1
 }
 
+# AGIC keeps re-applying config to the App Gateway; stop it before the destroy
+# so the gateway deletion is clean. Mirrors setup-aks.sh: if helm is not on
+# PATH, download a pinned build to a temp dir (no system install needed).
+HELM_VERSION="3.16.4"
+install_helm() {
+  command -v helm >/dev/null 2>&1 && return 0
+  echo "==> installing helm v${HELM_VERSION}"
+  local tmp
+  tmp="$(mktemp -d)"
+  case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
+    msys* | cygwin* | mingw* | windows*)
+      # The windows zip nests the binary under windows-amd64/ (older releases
+      # used helm/), so extract everything with junk paths and locate it.
+      curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-windows-amd64.zip" -o "$tmp/helm.zip"
+      unzip -q -j "$tmp/helm.zip" -d "$tmp"
+      ;;
+    *)
+      curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" | tar -xzf - -C "$tmp"
+      ;;
+  esac
+  chmod +x "$tmp"/* 2>/dev/null || true
+  # The tarball/zip keep the binary in a subdir (linux-amd64/, windows-amd64/);
+  # find it rather than assuming a flat layout.
+  HELM_BIN="$(find "$tmp" -type f \( -name 'helm' -o -name 'helm.exe' \) -print -quit)"
+  [ -n "$HELM_BIN" ] || { echo "ERROR: helm binary not found after download"; exit 1; }
+  HELM_DIR="$(dirname "$HELM_BIN")"
+  export PATH="$HELM_DIR:$PATH"
+  helm version --short
+}
+
 if cluster_reachable; then
   echo "==> deleting the app namespace (AGIC drops the Ingress routing)"
   if kubectl get ns app >/dev/null 2>&1; then
     kubectl delete ns app --timeout=300s
   fi
 
-  if command -v helm >/dev/null 2>&1 && \
-     helm list -n ingress-azure -q 2>/dev/null | grep -q '^agic-controller$'; then
+  install_helm
+  if helm list -n ingress-azure -q 2>/dev/null | grep -q '^agic-controller$'; then
     echo "==> uninstalling AGIC"
     helm uninstall agic-controller -n ingress-azure
   fi

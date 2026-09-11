@@ -59,16 +59,20 @@ install_helm() {
   tmp="$(mktemp -d)"
   case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
     msys* | cygwin* | mingw* | windows*)
+      # The windows zip nests the binary under windows-amd64/ (older releases
+      # used helm/), so extract everything with junk paths and locate it.
       curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-windows-amd64.zip" -o "$tmp/helm.zip"
-      unzip -q -j "$tmp/helm.zip" helm.exe -d "$tmp"
+      unzip -q -j "$tmp/helm.zip" -d "$tmp"
       ;;
     *)
       curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" | tar -xzf - -C "$tmp"
       ;;
   esac
-  chmod +x "$tmp/helm"* 2>/dev/null || true
-  HELM_BIN="$tmp/helm"
-  [ -f "$tmp/helm.exe" ] && HELM_BIN="$tmp/helm.exe"
+  chmod +x "$tmp"/* 2>/dev/null || true
+  # The tarball/zip keep the binary in a subdir (linux-amd64/, windows-amd64/);
+  # find it rather than assuming a flat layout.
+  HELM_BIN="$(find "$tmp" -type f \( -name 'helm' -o -name 'helm.exe' \) -print -quit)"
+  [ -n "$HELM_BIN" ] || { echo "ERROR: helm binary not found after download"; exit 1; }
   HELM_DIR="$(dirname "$HELM_BIN")"
   export PATH="$HELM_DIR:$PATH"
   helm version --short
