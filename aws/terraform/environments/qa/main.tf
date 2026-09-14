@@ -68,7 +68,8 @@ module "secrets" {
   tags = local.tags
 }
 
-# Note: the aws-auth ConfigMap (node role -> system:node) is applied by
-# bootstrap/setup-eks.sh with kubectl, not here. The kubernetes provider
-# cannot plan kubernetes_manifest before the cluster exists (its
-# cluster_ca_certificate is unknown at plan time).
+# The aws-auth ConfigMap (node role + CD role) is managed by the kubernetes
+# provider inside the eks module (kubernetes_config_map_v1.aws_auth). EKS
+# auto-creates it with the node role when the managed node group is created, so
+# bootstrap/setup-eks.sh runs a one-time `terraform import` to adopt it; the
+# module then reconciles it (adding the CD role).

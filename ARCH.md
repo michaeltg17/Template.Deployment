@@ -160,8 +160,9 @@ aws/
                          envs), versioning, public access block, SSE
     modules/
       vpc/               VPC, 3 public + 3 private subnets, IGW, 1 NAT
-      eks/               cluster, node group, addons, SGs, aws-auth,
-                         ALB-controller IRSA role, GitHub OIDC role
+       eks/               cluster, node group, addons, SGs, aws-auth ConfigMap
+                          (kubernetes provider: node + CD role), ALB-controller
+                          IRSA role, GitHub OIDC role
       rds/               PostgreSQL instance, subnet group, SG, optional app user
       secrets/           Secrets Manager (db / db-master / image-api) + SSM param +
                          the External Secrets Operator IRSA role
@@ -318,7 +319,7 @@ Required per environment (repo settings -> Secrets & variables -> Actions):
 
 That is the **only** per-env GitHub value. The DB login (app or master) + image API key are in Secrets Manager (synced by ESO) and the image API URL is in SSM Parameter Store (`/template/<env>/image-api-url`), all created by `terraform apply`. `dev`/`qa`/`prod` all follow this pattern: each has an `aws/terraform/environments/<env>` and one `AWS_ROLE_ARN_<ENV>` variable.
 
-No kubeconfig secret: kubectl authenticates through the OIDC role (`aws eks update-kubeconfig` mints short-lived tokens per request).
+No kubeconfig secret: kubectl authenticates through the OIDC role (`aws eks update-kubeconfig` mints short-lived tokens per request). The CD role is granted cluster access by being mapped into the `aws-auth` ConfigMap (group `system:masters`), which the `eks` module manages via the `kubernetes` provider (`kubernetes_config_map_v1.aws_auth`). EKS auto-creates that ConfigMap with the node role when the managed node group is created, so `bootstrap/setup-eks.sh` runs a one-time `terraform import` to adopt it before the module reconciles it.
 
 ### Destroy everything (after validation)
 
