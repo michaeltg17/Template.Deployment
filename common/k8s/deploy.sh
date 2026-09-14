@@ -192,6 +192,11 @@ echo "==> [$CLOUD] secrets"
 apply secrets.yaml
 
 echo "==> [$CLOUD] migrations (runs against the DB at ${RDS_ENDPOINT})"
+# A Job's spec.template is immutable, so a changed template (new image tag, or
+# an edited init-container command) makes `kubectl apply` fail with "field is
+# immutable". Delete any existing job first so the new one is created fresh.
+# dbup is idempotent, so re-running on each deploy is safe.
+kubectl -n app delete job migrations --ignore-not-found >/dev/null 2>&1 || true
 apply migrations-job.yaml
 if ! kubectl -n app wait --for=condition=complete job/migrations --timeout=300s; then
   echo "ERROR: migrations job failed. Last logs:" >&2
