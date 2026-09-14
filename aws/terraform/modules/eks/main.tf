@@ -4,11 +4,30 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 5.0"
     }
+    kubernetes = {
+      source = "hashicorp/kubernetes"
+    }
   }
 }
 
 locals {
   tags = var.tags
+}
+
+# Speaks to the cluster's API server directly (no kubeconfig), authenticating
+# via `aws eks get-token` (the same exec credential plugin kubectl uses). This
+# runs with the credentials of whoever executes terraform, who is the cluster
+# creator and therefore has cluster-admin access. Used to manage the aws-auth
+# ConfigMap (see kubernetes_config_map_v1.aws_auth) without a shell heredoc.
+provider "kubernetes" {
+  host                   = aws_eks_cluster.this.endpoint
+  cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--region", var.region]
+  }
 }
 
 # Cluster security group: protects the (private) API endpoint.
@@ -98,28 +117,14 @@ resource "aws_eks_cluster" "this" {
     aws_security_group.node,
   ]
 
-  # Apply the aws-auth ConfigMap the moment the control plane is active,
-  # BEFORE the node group boots: kubelets cannot register (and the
-  # aws_eks_node_group waiter below would stall) until the node role is
-  # mapped. Runs on the machine executing terraform (needs aws + kubectl).
+  # Set up a kubeconfig context for the cluster so the operator can use
+  # kubectl right after `terraform apply`. The aws-auth ConfigMap itself is
+  # managed by kubernetes_config_map_v1.aws_auth (EKS auto-creates it with the
+  # node role when the managed node group is created; we add the CD role).
+  # Uses var.name (not aws_eks_cluster.this.name): a provisioner must not
+  # reference the resource it is attached to - that forms a self-cycle.
   provisioner "local-exec" {
-    # Uses var.name (not aws_eks_cluster.this.name): a provisioner must not
-    # reference the resource it is attached to - that forms a self-cycle
-    # (X expand <-> X).
-    command = <<-EOT
-      aws eks update-kubeconfig --name ${var.name} --alias ${var.name} --region ${var.region}
-      kubectl --context ${var.name} -n kube-system apply -f - <<EOF
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: aws-auth
-      data:
-        mapRoles: |
-          - rolemarn: ${aws_iam_role.node.arn}
-            username: system:node:{{EC2PrivateDNSName}}
-            groups: ["system:bootstrappers", "system:nodes"]
-      EOF
-    EOT
+    command = "aws eks update-kubeconfig --name ${var.name} --alias ${var.name} --region ${var.region}"
   }
 
   tags = merge(local.tags, { Name = var.name })
@@ -506,6 +511,35 @@ data "aws_iam_policy_document" "alb_controller" {
     ]
     resources = ["*"]
   }
+}
+
+# Map the CD role into the legacy aws-auth ConfigMap so `aws eks get-token`
+# (the kubectl exec credential plugin used by the CD workflow) can
+# authenticate. This cluster uses the CONFIG_MAP auth mode, so access entries
+# are not available; the ConfigMap is the only mechanism.
+#
+# EKS auto-creates the aws-auth ConfigMap (with the node role) when the
+# managed node group is created, so this resource runs after the node group
+# and adds the CD role on top. Managed via the kubernetes provider (not a
+# local-exec heredoc, which does not work under the Windows cmd.exe shell).
+resource "kubernetes_config_map_v1" "aws_auth" {
+  metadata {
+    name      = "aws-auth"
+    namespace = "kube-system"
+  }
+
+  data = {
+    mapRoles = templatefile("${path.module}/templates/aws-auth.tpl", {
+      node_role_arn = aws_iam_role.node.arn
+      cd_role_arn   = aws_iam_role.cd.arn
+      cluster_name  = var.name
+    })
+  }
+
+  depends_on = [
+    aws_eks_node_group.this,
+    aws_iam_role.cd,
+  ]
 }
 
 resource "aws_iam_role_policy" "alb_controller" {

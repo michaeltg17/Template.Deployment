@@ -41,6 +41,18 @@ ESO_CHART_VERSION="0.11.0"
 echo "==> waiting for cluster ${CLUSTER_NAME} to be active (${AWS_REGION})"
 aws eks wait cluster-active --name "$CLUSTER_NAME" --region "$AWS_REGION"
 
+# Adopt the aws-auth ConfigMap into terraform (one-time). EKS auto-creates this
+# ConfigMap (with the node role) when the managed node group is created, so the
+# kubernetes_config_map_v1 resource cannot create it - it must be imported.
+# After the import, re-run `terraform apply` to reconcile (it adds the CD role).
+echo "==> adopting the aws-auth ConfigMap into terraform (one-time)"
+if terraform -chdir="$TF_DIR" state list | grep -q "module.eks.kubernetes_config_map_v1.aws_auth"; then
+  echo "    already managed by terraform"
+else
+  terraform -chdir="$TF_DIR" import module.eks.kubernetes_config_map_v1.aws_auth kube-system/aws-auth
+  echo "    imported; re-run 'terraform -chdir=$TF_DIR apply' to reconcile (adds the CD role)"
+fi
+
 echo "==> updating kubeconfig (alias: ${CLUSTER_NAME})"
 aws eks update-kubeconfig --name "$CLUSTER_NAME" --alias "$CLUSTER_NAME" --region "$AWS_REGION"
 
