@@ -65,6 +65,18 @@ variable "github_repo" {
   default     = "michaeltg17/Template.Deployment"
 }
 
+variable "github_owner_id" {
+  description = "Numeric GitHub owner (user/org) ID, used to build GitHub's immutable OIDC 'sub' pattern (repos created on/after 2026-07-15). Find it with `gh api /users/<owner> --jq .id` (or /orgs/<org>). Empty = classic sub format only."
+  type        = string
+  default     = "13167621"
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub repo ID, used to build GitHub's immutable OIDC 'sub' pattern (repos created on/after 2026-07-15). Find it with `gh api /repos/<owner>/<repo> --jq .id`. Empty = classic sub format only."
+  type        = string
+  default     = "1334612509"
+}
+
 variable "cd_oidc_sub" {
   description = "OIDC 'sub' patterns (StringLike) allowed to assume the CD role. Default allows any ref; prod pins to the main/dev branches"
   type        = list(string)

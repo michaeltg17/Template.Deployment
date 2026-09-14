@@ -246,10 +246,13 @@ resource "aws_eks_node_group" "this" {
 resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
-  # GitHub's token endpoint serves a Let's Encrypt chain (leaf <- YR2 <- Root
-  # YR). Include the root (canonical value STS validates) plus the YR2
-  # intermediate. Verified 2026-08-27 via the AWS-documented s_client command.
-  thumbprint_list = ["ab9d0263244dd0326eb67015705a667e79cfe998", "2d74d6dfd96eea55ad7baafa0d3c6552b2dadc37"]
+  # These MUST be the SHA-1 of the certs in GitHub's JWKS (the keys that sign
+  # the OIDC tokens), NOT the TLS server-certificate chain of the endpoint.
+  # GitHub rotates these signing certs, so refresh periodically. To recompute:
+  #   fetch https://token.actions.githubusercontent.com/.well-known/openid-configuration
+  #   -> jwks_uri -> for each key, sha1(base64decode(key.x5c[0])).hex
+  # Verified 2026-09-14 against the live JWKS.
+  thumbprint_list = ["38e9b30b3a023a1b72309921a69a42fcc496c42c", "4f3e9ad8c9a6f5eb3173006f4fa630e28f43dce9", "ca435a638a8cfed6b89364e064e08460b91c6250"]
 
   tags = local.tags
 }
@@ -275,7 +278,19 @@ data "aws_iam_policy_document" "cd_assume" {
       variable = "token.actions.githubusercontent.com:sub"
       # Default (empty) allows any ref on the repo; prod passes explicit
       # ref:heads/main + ref:heads/dev patterns to pin the CD identity.
-      values = length(var.cd_oidc_sub) > 0 ? var.cd_oidc_sub : ["repo:${var.github_repo}:*"]
+      #
+      # Match BOTH sub formats:
+      #   classic:     repo:owner/name:ref:refs/heads/...
+      #   immutable:   repo:owner@<org-id>/name@<repo-id>:ref:refs/heads/...
+      # GitHub switched new repos (created on/after 2026-07-15) to the
+      # immutable-ID format, which a classic-only pattern never matches.
+      # The immutable pattern is only added when both numeric IDs are set.
+      values = length(var.cd_oidc_sub) > 0 ? var.cd_oidc_sub : concat(
+        ["repo:${var.github_repo}:*"],
+        (var.github_owner_id != "" && var.github_repo_id != "") ? [
+          "repo:${split("/", var.github_repo)[0]}@${var.github_owner_id}/${split("/", var.github_repo)[1]}@${var.github_repo_id}:*",
+        ] : [],
+      )
     }
   }
 }
@@ -298,15 +313,26 @@ data "aws_iam_policy_document" "cd" {
     resources = [aws_eks_cluster.this.arn]
   }
 
+  # `aws eks get-token` (the kubeconfig exec credential plugin) mints a
+  # Kubernetes token by calling sts:GetWebIdentityToken. Without it, kubectl
+  # fails with "the server has asked for the client to provide credentials".
+  # TODO(harden): scope sts:IdentityTokenAudience to this cluster's issuer.
+  statement {
+    effect    = "Allow"
+    actions   = ["sts:GetWebIdentityToken"]
+    resources = ["*"]
+  }
+
   statement {
     effect = "Allow"
     actions = [
       "rds:DescribeDBInstances",
     ]
     # Scoped to this env's DB identifier (<name>-db, created by the rds module).
+    # The RDS instance ARN uses the "db:" resource type (not "dbinstance:").
     # Wildcards only for region/account so the eks module stays decoupled from
     # the rds module (a direct ARN reference would be a module cycle).
-    resources = ["arn:aws:rds:*:*:dbinstance:${var.name}-db"]
+    resources = ["arn:aws:rds:*:*:db:${var.name}-db"]
   }
 
   statement {
