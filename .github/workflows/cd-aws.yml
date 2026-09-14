@@ -72,15 +72,18 @@ jobs:
       - name: "DIAGNOSTIC: decode OIDC token header (kid)"
         run: |
           set +e
-          token=$(curl -s -H "Authorization: bearer $ID_TOKEN_REQUEST_TOKEN" "$ID_TOKEN_REQUEST_URL")
+          echo "=== ID_TOKEN_REQUEST_URL ==="
+          echo "$ID_TOKEN_REQUEST_URL"
+          echo "=== token token present? ==="
+          [ -n "$ID_TOKEN_REQUEST_TOKEN" ] && echo "yes" || echo "no"
+          echo "=== curl (with audience) ==="
+          token=$(curl -sS -H "Authorization: bearer $ID_TOKEN_REQUEST_TOKEN" "$ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" 2>&1)
+          echo "token length: ${#token}"
+          echo "token first 200: $(printf '%s' "$token" | cut -c1-200)"
           header=$(printf '%s' "$token" | cut -d. -f1)
           padded=$(printf '%s' "$header" | awk '{n=length($0)%4; if(n==2) print $0"=="; else if(n==3) print $0"="; else print $0}')
-          echo "=== OIDC token JWT header (base64url-decoded) ==="
-          printf '%s' "$padded" | base64 -d 2>/dev/null; echo ""
-          echo "=== raw header ==="
-          echo "$header"
-          echo "=== full token (first 120 chars) ==="
-          printf '%s' "$token" | cut -c1-120; echo ""
+          echo "=== JWT header decoded ==="
+          printf '%s' "$padded" | base64 -d 2>&1; echo ""
           set -e
 
       - name: Configure AWS credentials (GitHub OIDC)
