@@ -70,7 +70,7 @@ jobs:
         run: curl -fsSL https://get.k8s.io | bash
 
       - name: Configure AWS credentials (GitHub OIDC)
-        uses: setup-aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars[format('AWS_ROLE_ARN_{0}', github.event.inputs.env)] }}
           aws-region: ${{ env.AWS_REGION }}
