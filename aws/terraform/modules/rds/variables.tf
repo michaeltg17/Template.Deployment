@@ -40,15 +40,58 @@ variable "master_username" {
 }
 
 variable "master_password" {
-  description = "Master password. Must match DB_PASSWORD in k8s/environments/<env>.secrets.env and the CD secret"
+  description = "Master password. Used for the master login (and, when app_username is empty, the login the app connects as)"
   type        = string
   sensitive   = true
+}
+
+variable "app_username" {
+  description = "Optional dedicated application login (prod). When set, the app + migrations connect as this user instead of the master. The role itself is created by bootstrap/provision-db-user.sh (the private RDS endpoint is not reachable from the terraform runner). Empty = the app connects as the master user (dev/qa)"
+  type        = string
+  default     = ""
+}
+
+variable "app_password" {
+  description = "Password for the dedicated application login (only used when app_username is set)"
+  type        = string
+  sensitive   = true
+  default     = ""
 }
 
 variable "multi_az" {
   description = "Multi-AZ standby (handles infrastructure failure, roughly doubles DB cost)"
   type        = bool
   default     = true
+}
+
+variable "apply_immediately" {
+  description = "Apply pending changes immediately (dev). Prod sets false so changes land in the maintenance window"
+  type        = bool
+  default     = true
+}
+
+variable "backup_retention_period" {
+  description = "Automated backup retention in days"
+  type        = number
+  default     = 1
+}
+
+variable "deletion_protection" {
+  description = "Refuse deletion (prod sets true)"
+  type        = bool
+  default     = false
+}
+
+variable "skip_final_snapshot" {
+  description = "Skip the final snapshot on destroy (dev). Prod sets false and provides final_snapshot_identifier"
+  type        = bool
+  default     = true
+}
+
+variable "final_snapshot_identifier" {
+  description = "Final snapshot identifier (required when skip_final_snapshot is false)"
+  type        = string
+  default     = ""
 }
 
 variable "vpc_id" {

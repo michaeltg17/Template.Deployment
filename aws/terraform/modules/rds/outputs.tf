@@ -19,6 +19,11 @@ output "port" {
 }
 
 output "username" {
-  description = "Master username (put in k8s/environments/<env>.env as DB_USER)"
+  description = "The login the app connects as (the dedicated app user when app_username is set, otherwise the master user). Put in k8s/environments/<env>.env as DB_USER and store in the <env>-db secret"
+  value       = var.app_username != "" ? var.app_username : aws_db_instance.this.username
+}
+
+output "master_username" {
+  description = "Master username (always the RDS master login; bootstrap/provision-db-user.sh uses it to create the app user)"
   value       = aws_db_instance.this.username
 }

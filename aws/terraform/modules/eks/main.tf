@@ -273,7 +273,9 @@ data "aws_iam_policy_document" "cd_assume" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:*"]
+      # Default (empty) allows any ref on the repo; prod passes explicit
+      # ref:heads/main + ref:heads/dev patterns to pin the CD identity.
+      values = length(var.cd_oidc_sub) > 0 ? var.cd_oidc_sub : ["repo:${var.github_repo}:*"]
     }
   }
 }
@@ -316,6 +318,18 @@ data "aws_iam_policy_document" "cd" {
       "elbv2:DescribeTags",
     ]
     resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ssm:GetParameter",
+    ]
+    # Non-secret config (the image API URL) the CD workflow renders into the
+    # env file. Wildcard region/account + the template/ path prefix keeps the
+    # eks module decoupled from the secrets module (a direct ARN reference
+    # would be a module cycle). Read-only.
+    resources = ["arn:aws:ssm:*:*:parameter/template/*"]
   }
 }
 

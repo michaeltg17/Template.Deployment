@@ -65,6 +65,12 @@ variable "github_repo" {
   default     = "michaeltg17/Template.Deployment"
 }
 
+variable "cd_oidc_sub" {
+  description = "OIDC 'sub' patterns (StringLike) allowed to assume the CD role. Default allows any ref; prod pins to the main/dev branches"
+  type        = list(string)
+  default     = []
+}
+
 variable "tags" {
   description = "Tags applied to every resource in this module"
   type        = map(string)

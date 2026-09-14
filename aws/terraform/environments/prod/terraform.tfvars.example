@@ -1,0 +1,27 @@
+# Copy to terraform.tfvars (gitignored) and fill in the sensitive values.
+# The non-sensitive prod hardening (node profile, RDS class, deletion
+# protection, final snapshot, backup retention, pinned CD OIDC sub) lives in
+# the variable defaults in variables.tf - only the secrets below need values.
+#
+# Secrets live in AWS, not GitHub: the values are pushed into Secrets Manager
+# (the app-login + master-login + image API key) and SSM Parameter Store (the
+# image API URL) by the secrets module. The pods read them at runtime via
+# External Secrets Operator; the CD workflow reads the SSM parameter + RDS
+# describe and never sees the password or key. The ONLY per-env GitHub value
+# is the AWS_ROLE_ARN_prod repo VARIABLE (terraform output -raw cd_role_arn).
+
+# RDS master password (admin only; the app does NOT use this).
+db_master_password = "change-me-master-password"
+
+# Dedicated app login (the app + migrations connect as this user). After
+# `terraform apply` + bootstrap/setup-eks.sh prod, run
+#   bash aws/bootstrap/provision-db-user.sh prod
+# to create the role in the DB (it reads the master creds from the
+# template-prod-db-master secret and the app creds from template-prod-db).
+db_app_username = "template_app"
+db_app_password = "change-me-app-password"
+
+# Image API for this environment (the service is not live yet - random values
+# are fine; update the SSM parameter / secret when it is).
+image_api_key = "change-me-image-api-key"
+image_api_url = "https://image-api.example.invalid"

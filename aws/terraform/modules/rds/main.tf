@@ -78,11 +78,13 @@ resource "aws_db_instance" "this" {
   vpc_security_group_ids = [aws_security_group.this.id]
   publicly_accessible    = false
 
-  # dev: apply changes immediately, no final snapshot on destroy
-  apply_immediately       = true
-  backup_retention_period = 1
-  deletion_protection     = false
-  skip_final_snapshot     = true
+  # dev: apply changes immediately, no final snapshot on destroy. Prod flips
+  # these (see environments/prod/terraform.tfvars.example).
+  apply_immediately         = var.apply_immediately
+  backup_retention_period   = var.backup_retention_period
+  deletion_protection       = var.deletion_protection
+  skip_final_snapshot       = var.skip_final_snapshot
+  final_snapshot_identifier = var.skip_final_snapshot ? null : var.final_snapshot_identifier
 
   tags = merge(local.tags, { Name = var.name })
 }
