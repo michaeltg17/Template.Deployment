@@ -12,7 +12,7 @@ terraform {
   # managed by terraform/bootstrap), S3-native locking.
   backend "s3" {
     bucket       = "michaeltg17-template-terraform-state"
-    key          = "dev/terraform.tfstate"
+    key          = "qa/terraform.tfstate"
     region       = "us-east-1"
     use_lockfile = true
     encrypt      = true

@@ -23,8 +23,10 @@ terraform fmt -check -recursive .
 echo "OK: terraform fmt"
 
 echo
-echo "[2/5] Terraform validate (aws + azure)"
+echo "[2/5] Terraform validate (aws dev/qa/prod + azure)"
 tfvalidate "aws/terraform/environments/dev"
+tfvalidate "aws/terraform/environments/qa"
+tfvalidate "aws/terraform/environments/prod"
 tfvalidate "azure/terraform/environments/dev"
 echo "OK: terraform validate"
 

@@ -1,0 +1,18 @@
+# Grants cluster-admin to the "admins" group. The CD identity (the GitHub
+# Actions OIDC role) is a member of that group via its EKS access entry (see
+# the eks terraform module). This is the access-entry equivalent of the legacy
+# aws-auth ConfigMap's system:masters mapping - EKS access entries reject any
+# group starting with "system:", so cluster-admin is granted through a custom
+# group + this binding instead. Applied by deploy.sh (aws path) before the
+# workloads.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cd-admins
+subjects:
+  - kind: Group
+    name: admins
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io

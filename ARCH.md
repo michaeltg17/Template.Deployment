@@ -142,13 +142,14 @@ Network layout (VNet + subnets; dev is single-region, one zone):
 common/
   k8s/
     namespace.yaml
-    secrets.yaml          template -> rendered by deploy.sh
+    secrets.yaml          baked Secrets (azure path); on aws these are ESO-owned
+                          and skipped via a `skip-if: aws` annotation
     migrations-job.yaml   one-shot dbup runner, re-run on upgrades
     api.yaml              deployment + service (TemplateApi__* env vars, HTTP probes)
     react.yaml            configmap (API_URL) + deployment + service
     environments/
-      dev.env.example         copy to dev.env: IMAGE_API_URL, RDS_ENDPOINT, DB_USER, tags
-      dev.secrets.env.example copy to dev.secrets.env: DB_PASSWORD, IMAGE_API_KEY
+      dev.env.example         copy to dev.env: IMAGE_API_URL, RDS_ENDPOINT, tags
+      dev.secrets.env.example copy to dev.secrets.env: DB_PASSWORD, IMAGE_API_KEY (azure only)
     deploy.sh               <env> <cloud> -> renders + applies common/* + <cloud>/k8s/*
   ci.sh                   the CI checks (terraform fmt/validate, shellcheck, kubeconform)
   ci-docker.sh            builds the CI tools image, runs ci.sh on the working tree
@@ -159,17 +160,27 @@ aws/
                          envs), versioning, public access block, SSE
     modules/
       vpc/               VPC, 3 public + 3 private subnets, IGW, 1 NAT
-      eks/               cluster, node group, addons, SGs, aws-auth,
-                         ALB-controller IRSA role, GitHub OIDC role
-      rds/               PostgreSQL instance, subnet group, SG
+        eks/               cluster (API auth mode), node group, addons, SGs,
+                           EKS access entry for the CD role, ALB-controller
+                           IRSA role, GitHub OIDC role
+      rds/               PostgreSQL instance, subnet group, SG, optional app user
+      secrets/           Secrets Manager (db / db-master / image-api) + SSM param +
+                         the External Secrets Operator IRSA role
     environments/
       dev/               module wiring + per-env values (tfvars, gitignored),
                          state in S3 at dev/terraform.tfstate
+      qa/                same as dev (cheap profile), state at qa/terraform.tfstate
+      prod/              hardened (bigger nodes/db, deletion protection, final
+                         snapshot, pinned CD OIDC sub, dedicated app user), state
+                         at prod/terraform.tfstate
   bootstrap/
-    setup-eks.sh         kubeconfig + wait nodes + helm install ALB controller
+    setup-eks.sh         kubeconfig + wait nodes + helm install ALB controller + ESO
+    provision-db-user.sh create the prod app login in RDS (psql job on the cluster)
     teardown.sh          k8s cleanup -> terraform destroy -> verify
   k8s/
     ingress.yaml         ALB ingress: /api -> api, / -> react (+ ALB healthcheck path)
+    secretstore.yaml     ClusterSecretStore -> AWS Secrets Manager (IRSA via ESO SA)
+    external-secret.yaml ExternalSecrets: db login + image-api key -> in-cluster Secrets
 azure/
   terraform/
     bootstrap/           the remote state itself: resource group + storage account
@@ -209,11 +220,12 @@ Builds the `template-deployment-ci` tools image once (terraform, shellcheck, pyt
 
 `common/k8s/` holds the cloud-agnostic manifests. `deploy.sh <env> <cloud>`:
 
-1. Renders the common manifests + the `<cloud>/k8s/` overlay into a temp dir, replacing `__RDS_ENDPOINT__`, `__DB_USER__`, `__DB_PASSWORD__`, `__IMAGE_API_URL__`, `__IMAGE_API_KEY__`.
-2. Applies in order: namespace -> secrets -> migrations job (waits) -> api -> react -> the cloud's ingress.
-3. Prints the load balancer URL (ALB `load-balancer-ingress-controller` annotation on AWS; App Gateway `fqdn` output on Azure).
+1. Renders the common manifests + the `<cloud>/k8s/` overlay into a temp dir, replacing `__RDS_ENDPOINT__`, `__DB_USER__`, `__DB_PASSWORD__`, `__IMAGE_API_URL__`, `__IMAGE_API_KEY__` (and, on AWS, `__AWS_REGION__`, `__DB_SECRET_NAME__`, `__IMAGE_API_SECRET_NAME__` from terraform outputs / env vars).
+2. Drops any doc guarded by a `skip-if: <cloud>` annotation that matches the current cloud (this keeps the baked `secrets.yaml` Secrets out of the AWS path, where ESO owns them).
+3. Applies in order: namespace -> (aws) ESO store + ExternalSecrets, wait for ESO to populate the in-cluster Secrets -> secrets -> migrations job (waits) -> api -> react -> the cloud's ingress.
+4. Prints the load balancer URL (ALB `load-balancer-ingress-controller` annotation on AWS; App Gateway `fqdn` output on Azure).
 
-The two clouds differ only in the ingress (ALB annotations vs. the AGIC `IngressClass`), which is why the ingress lives in `<cloud>/k8s/` rather than `common/k8s/`.
+**Secrets differ by cloud.** On **Azure** the DB password + image API key are baked into the `secrets.yaml` Secrets (rendered from `<env>.secrets.env`). On **AWS** they live in **Secrets Manager** and are synced into the cluster at runtime by **External Secrets Operator** (`aws/k8s/secretstore.yaml` + `external-secret.yaml`); the DB login's username + password are pulled from the `template-<env>-db` secret and the connection string is assembled by an ESO v2 template, so the password never enters the manifests or the CD workflow. The two clouds also differ in the ingress (ALB annotations vs. the AGIC `IngressClass`), which is why the ingress lives in `<cloud>/k8s/` rather than `common/k8s/`.
 
 ---
 
@@ -242,39 +254,47 @@ The two clouds differ only in the ingress (ALB annotations vs. the AGIC `Ingress
 
 2. **Provision AWS** (takes ~15-20 min):
 
-   ```sh
-   cd aws/terraform/environments/dev
-   cp terraform.tfvars.example terraform.tfvars   # set db_master_password
-   terraform init
-   terraform apply
-   ```
+    ```sh
+    cd aws/terraform/environments/dev
+    cp terraform.tfvars.example terraform.tfvars   # set the secrets below
+    terraform init
+    terraform apply
+    ```
 
-   `db_master_password` in `terraform.tfvars` MUST equal `DB_PASSWORD` in `aws` secrets (below).
+    The tfvars hold the secrets that Terraform pushes into **Secrets Manager** (the app/master DB login + the image API key) and **SSM Parameter Store** (the image API URL). There is no manual "copy the password into a GitHub secret" step: the values go straight into AWS, and the pods + CD read them from there. (On `prod`, the tfvars also set the dedicated `db_app_username` / `db_app_password`.)
 
-3. **Bootstrap the cluster** (kubeconfig + ALB load balancer controller):
+3. **Bootstrap the cluster** (kubeconfig + ALB load balancer controller + ESO):
 
-   ```sh
-   bash aws/bootstrap/setup-eks.sh dev
-   ```
+    ```sh
+    bash aws/bootstrap/setup-eks.sh dev
+    ```
 
-4. **Fill env values**:
+    Installs the ALB controller **and** External Secrets Operator (the ESO service account is annotated with the ESO IRSA role ARN from `terraform output -raw eso_role_arn`).
 
-   ```sh
-   cp common/k8s/environments/dev.env.example common/k8s/environments/dev.env
-   #    IMAGE_API_URL=<image api host>, RDS_ENDPOINT=(terraform output -raw rds_endpoint),
-   #    DB_USER=(terraform output -raw db_user)
-   cp common/k8s/environments/dev.secrets.env.example common/k8s/environments/dev.secrets.env
-   #    fill DB_PASSWORD= (same as terraform.tfvars) and IMAGE_API_KEY=
-   ```
+4. **Fill env values** (non-secret only — there is NO secrets file on AWS):
 
-5. **Deploy** (the cloud argument is what picks the ALB ingress overlay):
+    ```sh
+    cp common/k8s/environments/dev.env.example common/k8s/environments/dev.env
+    #    IMAGE_API_URL=(aws ssm get-parameter --name /template/dev/image-api-url --query Parameter.Value --output text),
+    #    RDS_ENDPOINT=(terraform output -raw rds_endpoint)
+    ```
 
-   ```sh
-   cd common/k8s
-   ./deploy.sh dev aws
-   ```
+    The DB login (username + password) is not in the env file on AWS — ESO reads it from the `template-dev-db` secret and builds the connection string.
 
-   The script renders the placeholders, applies namespace -> secrets -> migrations job (against RDS) -> api -> react -> the ALB ingress, and prints the ALB URL once the controller publishes it on the Ingress status.
+5. **Deploy** (the cloud argument is what picks the ALB ingress overlay + the ESO path):
+
+    ```sh
+    cd common/k8s
+    ./deploy.sh dev aws
+    ```
+
+    The script renders the placeholders, applies namespace -> the ESO store + ExternalSecrets (and waits for ESO to populate the in-cluster Secrets) -> migrations job (against RDS) -> api -> react -> the ALB ingress, and prints the ALB URL once the controller publishes it on the Ingress status.
+
+    **Prod only** — after `setup-eks.sh prod`, create the dedicated app login in RDS (the private endpoint is unreachable from the runner, so it runs a psql job on the cluster):
+
+    ```sh
+    bash aws/bootstrap/provision-db-user.sh prod
+    ```
 
 6. **Validate**:
 
@@ -289,20 +309,17 @@ The app repos (`Template.Api`, `Template.React`) build and push their ghcr image
 
 1. Push to the app repo's `main` (its CI pushes the new `sha7` + `latest` images).
 2. GitHub -> **Actions** -> **Deploy (AWS)** (`.github/workflows/cd-aws.yml`) -> choose `env` -> **Run workflow**.
-3. The workflow assumes the env's OIDC role, resolves the `sha7` of the app repos' `main` HEAD (or a specific `sha7` from the optional `api_tag` / `react_tag` fields, to pin or roll back), resolves the RDS endpoint/user via the aws CLI, renders the env files, and runs `common/k8s/deploy.sh <env> aws` — which re-runs the migrations job and rolls the deployments.
+3. The workflow assumes the env's OIDC role, resolves the `sha7` of the app repos' `main` HEAD (or a specific `sha7` from the optional `api_tag` / `react_tag` fields, to pin or roll back), resolves the RDS endpoint via the aws CLI and the image API URL from SSM Parameter Store, renders the env file, and runs `common/k8s/deploy.sh <env> aws` — which re-runs the migrations job and rolls the deployments. The DB password + image API key are never in GitHub: ESO reads them from Secrets Manager at runtime.
 
 Required per environment (repo settings -> Secrets & variables -> Actions):
 
-| Type   | Name                  | Value                                                        |
-| ------ | --------------------- | ------------------------------------------------------------ |
-| Secret | `AWS_ROLE_ARN_DEV`    | `terraform output -raw cd_role_arn`                          |
-| Secret | `DB_PASSWORD_DEV`     | RDS master password (must match `db_master_password` in tfvars) |
-| Secret | `IMAGE_API_KEY_DEV`   | image API key for this env                                    |
-| Var    | `IMAGE_API_URL_DEV`   | image API base URL for this env (e.g. the dev image-api host) |
+| Type | Name               | Value                                    |
+| ---- | ------------------ | ---------------------------------------- |
+| Var  | `AWS_ROLE_ARN_DEV` | `terraform output -raw cd_role_arn`      |
 
-Only `dev` is provisioned in this repo so far; `qa`/`prod` (offered by the workflow) follow the same pattern: add an `aws/terraform/environments/<env>` plus the per-env secrets/vars above.
+That is the **only** per-env GitHub value. The DB login (app or master) + image API key are in Secrets Manager (synced by ESO) and the image API URL is in SSM Parameter Store (`/template/<env>/image-api-url`), all created by `terraform apply`. `dev`/`qa`/`prod` all follow this pattern: each has an `aws/terraform/environments/<env>` and one `AWS_ROLE_ARN_<ENV>` variable.
 
-No kubeconfig secret: kubectl authenticates through the OIDC role (`aws eks update-kubeconfig` mints short-lived tokens per request).
+No kubeconfig secret: kubectl authenticates through the OIDC role (`aws eks update-kubeconfig` mints short-lived tokens per request). The cluster runs in EKS **API auth mode** (access entries, not the legacy `aws-auth` ConfigMap): the `eks` module sets `access_config.authentication_mode = "API"` and creates an access entry for the CD role in a custom `admins` group (EKS rejects any access-entry group starting with `system:`, so `system:masters` is not usable). EKS auto-creates the node-role entry for the managed node group. Cluster-admin for the CD role is granted by the `cd-admins` ClusterRoleBinding (`aws/k8s/cd-admin.yaml`, applied by `deploy.sh`) that binds the built-in `cluster-admin` ClusterRole to the `admins` group. Note the auth-mode change is one-way (`CONFIG_MAP` -> `API_AND_CONFIG_MAP` -> `API`) and in-place (no cluster replacement); `bootstrap_cluster_creator_admin_permissions` is pinned to `true` to avoid a provider recreation bug (hashicorp/terraform-provider-aws#38967).
 
 ### Destroy everything (after validation)
 
@@ -328,11 +345,15 @@ The remote state itself (the S3 bucket from `aws/terraform/bootstrap`) is **not*
 
 Re-deploying later is: `terraform apply` -> `aws/bootstrap/setup-eks.sh` -> `common/k8s/deploy.sh dev aws`.
 
+### Prod hardening
+
+`prod` (`aws/terraform/environments/prod`) hardens the shared defaults in `variables.tf`: bigger nodes (`m7i-flex.xlarge`, 3/AZ), a bigger DB (`db.t4g.medium`), RDS `deletion_protection` + a final snapshot + 7-day backups + `apply_immediately=false`, a **dedicated app login** (dev/qa use the master user), and the CD OIDC identity pinned to `ref:heads/main` + `ref:heads/dev` (dev/qa allow any ref). The only extra step vs. dev/qa is `bash aws/bootstrap/provision-db-user.sh prod` (creates the app login, since the private RDS is unreachable from the runner).
+
 ### Known limitations (AWS, by design, for this phase)
 
 - Plain HTTP, no domain/cert: the ALB listens on :80 only. When a domain exists, add an ACM cert + `listen-ports` HTTPS + a redirect (Ingress annotations).
 - Single NAT gateway in one AZ (cheapest): an AZ outage affects new image pulls, not running pods. Add one NAT per AZ for full HA.
-- The app connects to RDS as the master user (dev). Create a dedicated app user (and IAM auth) before prod.
+- dev/qa connect to RDS as the master user; **prod** uses a dedicated app login (`db_app_username`/`db_app_password`, created by `provision-db-user.sh`). IAM database auth is not used (password auth via the Secrets Manager secret).
 - The RDS connection uses `SSL Mode=Require` with `Trust Server Certificate=true`: traffic is encrypted but the RDS CA is not pinned, so the server's identity is not verified (a MITM could present a fake cert). For prod, pin the RDS CA certificate and use `SSL Mode=Verify-Full`.
 - CI/CD never runs `terraform` (only `common/k8s/deploy.sh`). If that changes (e.g. a pipeline applies prod), the pipeline role needs S3 access to the env's state key + lockfile in `michaeltg17-template-terraform-state` (see the [S3 backend docs](https://developer.hashicorp.com/terraform/language/backend/s3#permissions-required) for the exact statements).
 - `worker_min_size` defaults to 1: set it to 3 (one per AZ) when the app needs real HA.

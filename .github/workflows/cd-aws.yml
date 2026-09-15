@@ -11,14 +11,17 @@
 # call `aws eks get-token` per request).
 #
 # Resource names are derived from the env: cluster template-<env>,
-# RDS instance template-<env>-db (the endpoint/user are resolved at
-# runtime with the aws CLI, so nothing goes stale).
+# RDS instance template-<env>-db (the endpoint is resolved at runtime with the
+# aws CLI, so nothing goes stale).
+#
+# Secrets/config live in AWS, not GitHub: the DB login (app or master) + image
+# API key are in Secrets Manager and synced into the cluster by External Secrets
+# Operator; the image API base URL is in SSM Parameter Store
+# (template/<env>/image-api-url) and read here. The ONLY per-env GitHub value is
+# the CD role ARN as a repo VARIABLE (from `terraform output -raw cd_role_arn`).
 #
 # Required per env (repo settings):
-#   secrets: AWS_ROLE_ARN_<ENV>   (from `terraform output -raw cd_role_arn`)
-#            DB_PASSWORD_<ENV>    (must match the RDS password in tfvars)
-#            IMAGE_API_KEY_<ENV>
-#   vars:    IMAGE_API_URL_<ENV>  (image API base URL for that env)
+#   vars:    AWS_ROLE_ARN_<ENV>   (from `terraform output -raw cd_role_arn`)
 
 name: Deploy (AWS)
 
@@ -53,9 +56,12 @@ jobs:
       ENV_NAME: ${{ github.event.inputs.env }}
       CLUSTER_NAME: template-${{ github.event.inputs.env }}
       RDS_IDENTIFIER: template-${{ github.event.inputs.env }}-db
-      IMAGE_API_URL: ${{ vars['IMAGE_API_URL_' + github.event.inputs.env] }}
-      DB_PASSWORD: ${{ secrets['DB_PASSWORD_' + github.event.inputs.env] }}
-      IMAGE_API_KEY: ${{ secrets['IMAGE_API_KEY_' + github.event.inputs.env] }}
+      SSM_IMAGE_API_URL: /template/${{ github.event.inputs.env }}/image-api-url
+      # ESO values are deterministic from the env name - passed to deploy.sh so
+      # it does not need `terraform init` in CD.
+      AWS_REGION: us-east-1
+      DB_SECRET_NAME: template-${{ github.event.inputs.env }}-db
+      IMAGE_API_SECRET_NAME: template-${{ github.event.inputs.env }}-image-api
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -64,9 +70,9 @@ jobs:
         run: curl -fsSL https://get.k8s.io | bash
 
       - name: Configure AWS credentials (GitHub OIDC)
-        uses: setup-aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets['AWS_ROLE_ARN_' + github.event.inputs.env] }}
+          role-to-assume: ${{ vars[format('AWS_ROLE_ARN_{0}', github.event.inputs.env)] }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve image tags (main HEAD sha7, or explicit override)
@@ -84,33 +90,34 @@ jobs:
             echo "REACT_TAG=$react_tag"
           } >> "$GITHUB_ENV"
 
-      - name: Resolve AWS resource values (RDS endpoint + user)
+      - name: Resolve AWS resource values (RDS endpoint + image API URL)
         run: |
           rds_endpoint=$(aws rds describe-db-instances --db-instance-identifier "$RDS_IDENTIFIER" \
             --query 'DBInstances[0].Endpoint.Address' --output text)
-          db_user=$(aws rds describe-db-instances --db-instance-identifier "$RDS_IDENTIFIER" \
-            --query 'DBInstances[0].MasterUsername' --output text)
           if [ -z "$rds_endpoint" ] || [ "$rds_endpoint" = "None" ]; then
             echo "ERROR: RDS instance $RDS_IDENTIFIER not found (terraform not applied for this env?)"
             exit 1
           fi
+          image_api_url=$(aws ssm get-parameter --name "$SSM_IMAGE_API_URL" \
+            --with-decryption --query 'Parameter.Value' --output text)
+          if [ -z "$image_api_url" ] || [ "$image_api_url" = "None" ]; then
+            echo "ERROR: SSM parameter $SSM_IMAGE_API_URL not found (terraform not applied for this env?)"
+            exit 1
+          fi
           echo "RDS_ENDPOINT=$rds_endpoint" >> "$GITHUB_ENV"
-          echo "DB_USER=$db_user" >> "$GITHUB_ENV"
+          echo "IMAGE_API_URL=$image_api_url" >> "$GITHUB_ENV"
 
-      - name: Render env files
+      - name: Render env file (no secrets file on AWS - ESO owns the secrets)
         run: |
-          : "${IMAGE_API_URL:?set the IMAGE_API_URL_$ENV_NAME repository variable}"
-          : "${DB_PASSWORD:?set the DB_PASSWORD_$ENV_NAME repository secret}"
-          : "${IMAGE_API_KEY:?set the IMAGE_API_KEY_$ENV_NAME repository secret}"
+          : "${IMAGE_API_URL:?could not read the image API URL from SSM}"
+          : "${RDS_ENDPOINT:?could not resolve the RDS endpoint}"
           sed \
             -e "s|^IMAGE_API_URL=.*|IMAGE_API_URL=$IMAGE_API_URL|" \
             -e "s|^RDS_ENDPOINT=.*|RDS_ENDPOINT=$RDS_ENDPOINT|" \
-            -e "s|^DB_USER=.*|DB_USER=$DB_USER|" \
             -e "s|^API_IMAGE_TAG=.*|API_IMAGE_TAG=$API_TAG|" \
             -e "s|^MIGRATIONS_IMAGE_TAG=.*|MIGRATIONS_IMAGE_TAG=$API_TAG|" \
             -e "s|^REACT_IMAGE_TAG=.*|REACT_IMAGE_TAG=$REACT_TAG|" \
             "common/k8s/environments/$ENV_NAME.env.example" > "common/k8s/environments/$ENV_NAME.env"
-          printf 'DB_PASSWORD=%s\nIMAGE_API_KEY=%s\n' "$DB_PASSWORD" "$IMAGE_API_KEY" > "common/k8s/environments/$ENV_NAME.secrets.env"
 
       - name: Configure kubectl (EKS)
         run: |

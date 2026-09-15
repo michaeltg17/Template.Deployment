@@ -18,14 +18,16 @@ spec:
       restartPolicy: Never
       initContainers:
         # RDS (created by terraform) - wait until it accepts connections.
-        # __RDS_ENDPOINT__ / __DB_USER__ are rendered by deploy.sh.
+        # __RDS_ENDPOINT__ is rendered by deploy.sh. pg_isready does not
+        # authenticate, so no -U/-d credentials are needed (and DB_USER is
+        # empty on AWS, where the login lives in the ESO-synced secret).
         - name: wait-for-db
           image: postgres:18.6
           command:
             - sh
             - -c
             - |
-              until pg_isready -h __RDS_ENDPOINT__ -p 5432 -U __DB_USER__ -d template_db; do
+              until pg_isready -h __RDS_ENDPOINT__ -p 5432 -d template_db; do
                 sleep 2
               done
       containers:
