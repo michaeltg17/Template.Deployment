@@ -172,6 +172,12 @@ echo "==> [$CLOUD] namespace"
 apply namespace.yaml
 
 if [ "$CLOUD" = "aws" ]; then
+  # Cluster-admin for the CD identity's "admins" group (the access-entry
+  # equivalent of the legacy aws-auth system:masters mapping). Applied before
+  # the workloads so the CD role keeps cluster-admin once the cluster flips to
+  # API auth mode (Phase 2).
+  echo "==> [aws] cd cluster-admin binding"
+  apply cd-admin.yaml
   echo "==> [aws] external-secrets store + ExternalSecrets (ESO syncs the secrets from AWS Secrets Manager)"
   apply secretstore.yaml
   apply external-secret.yaml

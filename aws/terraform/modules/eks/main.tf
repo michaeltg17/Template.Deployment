@@ -2,32 +2,13 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.0"
-    }
-    kubernetes = {
-      source = "hashicorp/kubernetes"
+      version = "~> 6.0"
     }
   }
 }
 
 locals {
   tags = var.tags
-}
-
-# Speaks to the cluster's API server directly (no kubeconfig), authenticating
-# via `aws eks get-token` (the same exec credential plugin kubectl uses). This
-# runs with the credentials of whoever executes terraform, who is the cluster
-# creator and therefore has cluster-admin access. Used to manage the aws-auth
-# ConfigMap (see kubernetes_config_map_v1.aws_auth) without a shell heredoc.
-provider "kubernetes" {
-  host                   = aws_eks_cluster.this.endpoint
-  cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
-
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "aws"
-    args        = ["eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--region", var.region]
-  }
 }
 
 # Cluster security group: protects the (private) API endpoint.
@@ -103,13 +84,31 @@ resource "aws_eks_cluster" "this" {
 
   vpc_config {
     subnet_ids = var.private_subnet_ids
-    # Public API access so kubectl/helm (the aws-auth provisioner,
-    # bootstrap/setup-eks.sh, and the CD workflow) can reach the control
-    # plane from outside the VPC. Auth is still enforced by IAM (OIDC/IRSA);
-    # restrict the cluster SG ingress before prod.
+    # Public API access so kubectl/helm (bootstrap/setup-eks.sh and the CD
+    # workflow) can reach the control plane from outside the VPC. Auth is
+    # still enforced by IAM (OIDC/IRSA); restrict the cluster SG ingress
+    # before prod.
     endpoint_public_access  = true
     endpoint_private_access = true
     security_group_ids      = [aws_security_group.cluster.id]
+  }
+
+  # Access entries are the recommended mechanism to grant IAM principals
+  # Kubernetes API access (they replace the legacy aws-auth ConfigMap). In API
+  # mode only access entries are used - there is no aws-auth ConfigMap. The
+  # node-role entry is auto-created by EKS for the managed node group; the CD
+  # role entry (aws_eks_access_entry.cd) is created here. The mode change is
+  # one-way (CONFIG_MAP -> API_AND_CONFIG_MAP -> API) and in-place (no
+  # replacement).
+  #
+  # bootstrap_cluster_creator_admin_permissions MUST be set explicitly.
+  # Leaving it null makes the provider flip it true -> null when this block
+  # is added, which forces a full cluster replacement (provider bug
+  # hashicorp/terraform-provider-aws#38967). Pinning it to true keeps the
+  # change in-place.
+  access_config {
+    authentication_mode                         = "API"
+    bootstrap_cluster_creator_admin_permissions = true
   }
 
   depends_on = [
@@ -118,11 +117,9 @@ resource "aws_eks_cluster" "this" {
   ]
 
   # Set up a kubeconfig context for the cluster so the operator can use
-  # kubectl right after `terraform apply`. The aws-auth ConfigMap itself is
-  # managed by kubernetes_config_map_v1.aws_auth (EKS auto-creates it with the
-  # node role when the managed node group is created; we add the CD role).
-  # Uses var.name (not aws_eks_cluster.this.name): a provisioner must not
-  # reference the resource it is attached to - that forms a self-cycle.
+  # kubectl right after `terraform apply`. Uses var.name (not
+  # aws_eks_cluster.this.name): a provisioner must not reference the resource
+  # it is attached to - that forms a self-cycle.
   provisioner "local-exec" {
     command = "aws eks update-kubeconfig --name ${var.name} --alias ${var.name} --region ${var.region}"
   }
@@ -369,6 +366,23 @@ resource "aws_iam_role_policy" "cd" {
   policy = data.aws_iam_policy_document.cd.json
 }
 
+# Access entry for the CD role (the GitHub Actions OIDC identity). In API auth
+# mode this is how the CD role gets Kubernetes API access (no aws-auth
+# ConfigMap). Only custom principals need a manual entry - EKS auto-creates
+# the node-role entry for the managed node group.
+#
+# The group is a custom "admins" group, NOT system:masters: EKS rejects any
+# access-entry group that starts with "system:". Cluster-admin is granted to
+# that group by the ClusterRoleBinding in aws/k8s/cd-admin.yaml (applied by
+# deploy.sh).
+resource "aws_eks_access_entry" "cd" {
+  cluster_name      = aws_eks_cluster.this.name
+  principal_arn     = aws_iam_role.cd.arn
+  user_name         = "cd-${var.name}"
+  type              = "STANDARD"
+  kubernetes_groups = ["admins"]
+}
+
 # ----- load balancer controller (IRSA) -----
 # The controller creates and manages the ALB from the Ingress in
 # k8s/ingress.yaml. The ALB (and its k8s-* security groups) are NOT in the
@@ -511,35 +525,6 @@ data "aws_iam_policy_document" "alb_controller" {
     ]
     resources = ["*"]
   }
-}
-
-# Map the CD role into the legacy aws-auth ConfigMap so `aws eks get-token`
-# (the kubectl exec credential plugin used by the CD workflow) can
-# authenticate. This cluster uses the CONFIG_MAP auth mode, so access entries
-# are not available; the ConfigMap is the only mechanism.
-#
-# EKS auto-creates the aws-auth ConfigMap (with the node role) when the
-# managed node group is created, so this resource runs after the node group
-# and adds the CD role on top. Managed via the kubernetes provider (not a
-# local-exec heredoc, which does not work under the Windows cmd.exe shell).
-resource "kubernetes_config_map_v1" "aws_auth" {
-  metadata {
-    name      = "aws-auth"
-    namespace = "kube-system"
-  }
-
-  data = {
-    mapRoles = templatefile("${path.module}/templates/aws-auth.tpl", {
-      node_role_arn = aws_iam_role.node.arn
-      cd_role_arn   = aws_iam_role.cd.arn
-      cluster_name  = var.name
-    })
-  }
-
-  depends_on = [
-    aws_eks_node_group.this,
-    aws_iam_role.cd,
-  ]
 }
 
 resource "aws_iam_role_policy" "alb_controller" {

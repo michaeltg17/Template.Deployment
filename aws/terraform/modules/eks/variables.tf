@@ -4,7 +4,7 @@ variable "name" {
 }
 
 variable "region" {
-  description = "AWS region (used by the aws-auth bootstrap provisioner)"
+  description = "AWS region (used by the update-kubeconfig provisioner)"
   type        = string
 }
 

@@ -68,8 +68,8 @@ module "secrets" {
   tags = local.tags
 }
 
-# The aws-auth ConfigMap (node role + CD role) is managed by the kubernetes
-# provider inside the eks module (kubernetes_config_map_v1.aws_auth). EKS
-# auto-creates it with the node role when the managed node group is created, so
-# bootstrap/setup-eks.sh runs a one-time `terraform import` to adopt it; the
-# module then reconciles it (adding the CD role).
+# Kubernetes API access uses EKS access entries (not the legacy aws-auth
+# ConfigMap). The eks module sets the cluster to API auth mode and creates an
+# access entry for the CD role (group "admins"); EKS auto-creates the node-role
+# entry for the managed node group. Cluster-admin for the CD role is granted by
+# the ClusterRoleBinding in aws/k8s/cd-admin.yaml (applied by deploy.sh).
