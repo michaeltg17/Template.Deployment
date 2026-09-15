@@ -19,14 +19,14 @@ variable "db_master_password" {
   sensitive   = true
 }
 
-variable "app_username" {
+variable "db_app_username" {
   description = "Dedicated app login (prod); empty = the app connects as the master user (dev/qa)"
   type        = string
   default     = ""
 }
 
-variable "app_password" {
-  description = "Dedicated app login password (only used when app_username is set)"
+variable "db_app_password" {
+  description = "Dedicated app login password (only used when db_app_username is set)"
   type        = string
   sensitive   = true
   default     = ""

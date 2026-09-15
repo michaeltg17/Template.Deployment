@@ -65,8 +65,8 @@ module "secrets" {
   environment             = var.environment
   db_master_username      = module.rds.master_username
   db_master_password      = var.db_master_password
-  app_username            = var.db_app_username
-  app_password            = var.db_app_password
+  db_app_username         = var.db_app_username
+  db_app_password         = var.db_app_password
   image_api_key           = var.image_api_key
   image_api_url           = var.image_api_url
   cluster_oidc_issuer     = module.eks.cluster_oidc_issuer

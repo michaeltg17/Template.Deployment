@@ -34,8 +34,8 @@ locals {
 
   db_secret_name = "${var.name}-db"
   # The login the app connects as: the dedicated app user when set, else master.
-  app_username = var.app_username != "" ? var.app_username : var.db_master_username
-  app_password = var.app_username != "" ? var.app_password : var.db_master_password
+  db_app_username = var.db_app_username != "" ? var.db_app_username : var.db_master_username
+  db_app_password = var.db_app_username != "" ? var.db_app_password : var.db_master_password
 }
 
 resource "aws_secretsmanager_secret" "db" {
@@ -49,8 +49,8 @@ resource "aws_secretsmanager_secret" "db" {
 resource "aws_secretsmanager_secret_version" "db" {
   secret_id = aws_secretsmanager_secret.db.id
   secret_string = jsonencode({
-    username = local.app_username
-    password = local.app_password
+    username = local.db_app_username
+    password = local.db_app_password
   })
 }
 
