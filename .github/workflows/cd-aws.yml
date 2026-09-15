@@ -58,7 +58,7 @@ jobs:
       RDS_IDENTIFIER: template-${{ github.event.inputs.env }}-db
       SSM_IMAGE_API_URL: /template/${{ github.event.inputs.env }}/image-api-url
       # ESO values are deterministic from the env name - passed to deploy.sh so
-      # it does not need `terraform init` in CI.
+      # it does not need `terraform init` in CD.
       AWS_REGION: us-east-1
       DB_SECRET_NAME: template-${{ github.event.inputs.env }}-db
       IMAGE_API_SECRET_NAME: template-${{ github.event.inputs.env }}-image-api

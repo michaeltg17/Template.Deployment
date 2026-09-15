@@ -81,7 +81,7 @@ fi
 DB_USER="${DB_USER:-}"
 if [ "$CLOUD" = "aws" ]; then
   # The secret names are deterministic (template-<env>-db / -image-api) and the
-  # region is fixed, so CI can pass them as env vars without `terraform init`.
+  # region is fixed, so CD can pass them as env vars without `terraform init`.
   # Locally they fall back to the terraform outputs.
   TF_DIR="$REPO_ROOT/aws/terraform/environments/$ENV_NAME"
   if [ -z "${AWS_REGION:-}" ] || [ -z "${DB_SECRET_NAME:-}" ] || [ -z "${IMAGE_API_SECRET_NAME:-}" ]; then

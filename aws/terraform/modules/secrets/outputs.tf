@@ -23,11 +23,6 @@ output "image_api_secret_name" {
   value       = aws_secretsmanager_secret.image_api.name
 }
 
-output "image_api_url_parameter_name" {
-  description = "SSM parameter name holding the image API URL (read by the CD workflow)"
-  value       = aws_ssm_parameter.image_api_url.name
-}
-
 output "eso_role_arn" {
   description = "IRSA role for External Secrets Operator (bootstrap/setup-eks.sh annotates the ESO service account with it)"
   value       = aws_iam_role.eso.arn

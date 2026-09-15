@@ -275,7 +275,7 @@ Builds the `template-deployment-ci` tools image once (terraform, shellcheck, pyt
 
     ```sh
     cp common/k8s/environments/dev.env.example common/k8s/environments/dev.env
-    #    IMAGE_API_URL=(terraform output -raw image_api_url_parameter_name -> SSM value),
+    #    IMAGE_API_URL=(aws ssm get-parameter --name /template/dev/image-api-url --query Parameter.Value --output text),
     #    RDS_ENDPOINT=(terraform output -raw rds_endpoint)
     ```
 

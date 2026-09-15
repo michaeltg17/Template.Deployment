@@ -53,11 +53,6 @@ output "image_api_secret_name" {
   value       = module.secrets.image_api_secret_name
 }
 
-output "image_api_url_parameter_name" {
-  description = "SSM parameter name holding the image API URL (the CD workflow reads it)"
-  value       = module.secrets.image_api_url_parameter_name
-}
-
 output "destroy_command" {
   description = "Destroys everything this config created"
   value       = "terraform destroy (run from this directory)"

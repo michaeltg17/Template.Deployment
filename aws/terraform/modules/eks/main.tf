@@ -42,7 +42,7 @@ resource "aws_security_group" "cluster" {
   # Dev: open to the world; auth is enforced by IAM. Restrict to specific
   # source CIDRs before prod.
   ingress {
-    description = "EKS API (443) to kubectl/CI"
+    description = "EKS API (443) to kubectl/CD"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
