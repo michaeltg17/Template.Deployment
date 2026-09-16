@@ -1,6 +1,6 @@
 locals {
-  # Shared prefix for every resource name (e.g. template-dev-rg, template-dev, ...)
-  name = "${var.project_name}-${var.environment}"
+  # Shared prefix for every resource name (e.g. dev-template-rg, dev-template, ...)
+  name = "${var.environment}-${var.project_name}"
 
   tags = {
     Project     = var.project_name

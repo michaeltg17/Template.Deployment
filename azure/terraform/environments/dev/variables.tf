@@ -5,13 +5,13 @@ variable "location" {
 }
 
 variable "project_name" {
-  description = "Resource name prefix and Project tag"
+  description = "Resource name suffix and Project tag"
   type        = string
   default     = "template"
 }
 
 variable "environment" {
-  description = "Environment name (suffix of every resource name)"
+  description = "Environment name (prefix of every resource name)"
   type        = string
   default     = "dev"
 }

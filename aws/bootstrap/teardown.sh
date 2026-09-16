@@ -116,7 +116,7 @@ else
 fi
 
 # The controller names its security groups k8s-*; Terraform-managed SGs use
-# the resource-name prefix (e.g. template-dev-*), so the prefix is unambiguous.
+# the resource-name prefix (e.g. dev-template-*), so the prefix is unambiguous.
 if [ -n "$VPC_ID" ]; then
   sg_ids="$(aws ec2 describe-security-groups --region "$AWS_REGION" \
     --filters "Name=vpc-id,Values=$VPC_ID" \

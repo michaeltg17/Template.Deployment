@@ -13,8 +13,8 @@
 # project_name = "template"
 # environment  = "qa"
 
-# RDS master password. Stored in the template-<env>-db-master secret (and,
-# when db_app_username is empty, in template-<env>-db - the login the app uses).
+# RDS master password. Stored in the <env>-template-db-master secret (and,
+# when db_app_username is empty, in <env>-template-db - the login the app uses).
 db_master_password = "change-me"
 
 # Image API for this environment (the service is not live yet - random values

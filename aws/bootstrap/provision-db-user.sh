@@ -5,9 +5,9 @@
 # role is created here - after `terraform apply` + bootstrap/setup-eks.sh - by
 # running a one-shot psql job on the cluster (it can reach the private DB).
 #
-# It reads, from Secrets Manager:
-#   template-<env>-db-master  -> the master login (used to connect and run DDL)
-#   template-<env>-db         -> the app login to create (username + password)
+# It reads, from Secrets Manager (names from the terraform outputs):
+#   <env>-template-db-master  -> the master login (used to connect and run DDL)
+#   <env>-template-db         -> the app login to create (username + password)
 # and the RDS endpoint via `aws rds describe-db-instances`.
 #
 # Idempotent: re-running is a no-op (the role is created only if absent, else
@@ -33,14 +33,18 @@ tfout() { terraform -chdir="$TF_DIR" output -raw "$1"; }
 
 CLUSTER_NAME="${CLUSTER_NAME:-$(tfout cluster_name)}"
 AWS_REGION="${AWS_REGION:-$(tfout region)}"
-RDS_IDENTIFIER="template-${ENV_NAME}-db"
+# The RDS identifier is the cluster name + "-db" (the env root wires the rds
+# module as "${local.name}-db", and the eks cluster is named "${local.name}").
+RDS_IDENTIFIER="${RDS_IDENTIFIER:-${CLUSTER_NAME}-db}"
+DB_SECRET_NAME="${DB_SECRET_NAME:-$(tfout db_secret_name)}"
+MASTER_SECRET_NAME="${MASTER_SECRET_NAME:-${DB_SECRET_NAME}-master}"
 
 secret_json() { aws secretsmanager get-secret-value --secret-id "$1" --region "$AWS_REGION" --query SecretString --output text; }
 json_field() { printf '%s' "$1" | python3 -c 'import sys,json; print(json.load(sys.stdin)["'$2'"])'; }
 
 echo "==> reading master + app credentials from Secrets Manager"
-MASTER_JSON="$(secret_json "template-${ENV_NAME}-db-master")"
-APP_JSON="$(secret_json "template-${ENV_NAME}-db")"
+MASTER_JSON="$(secret_json "$MASTER_SECRET_NAME")"
+APP_JSON="$(secret_json "$DB_SECRET_NAME")"
 MASTER_USER="$(json_field "$MASTER_JSON" username)"
 MASTER_PASS="$(json_field "$MASTER_JSON" password)"
 APP_USER="$(json_field "$APP_JSON" username)"
@@ -137,5 +141,5 @@ kubectl -n app delete secret provision-db-creds >/dev/null 2>&1 || true
 echo ""
 echo "============================================================"
 echo "  App login ${APP_USER} is provisioned on ${RDS_ENDPOINT}"
-echo "  The template-${ENV_NAME}-db secret already holds its credentials"
+echo "  The ${DB_SECRET_NAME} secret already holds its credentials"
 echo "============================================================"

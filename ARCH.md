@@ -4,6 +4,8 @@ Deployment of the template project in **two clouds: AWS and Azure**, managed end
 
 **Terraform owns the infrastructure** (network, cluster, database, load balancer, IAM incl. the controller roles and the GitHub OIDC identities). **Kubernetes owns the workloads.** The load balancer is a cloud resource but it is created and managed by the controller in-cluster from the Ingress (AWS: load-balancer-controller + ALB; Azure: AGIC + App Gateway), so route changes are just manifest changes.
 
+**Resource naming is env-first**: every env-scoped resource is named `<env>-<project>` (e.g. `dev-template`, `dev-template-db`, `dev-template-rg`), and the AWS SSM parameter for non-secret config lives at `/<env>/<project>/image-api-url`.
+
 ## Diagrams
 
 ### AWS (EKS + ALB + RDS)
@@ -225,7 +227,7 @@ Builds the `template-deployment-ci` tools image once (terraform, shellcheck, pyt
 3. Applies in order: namespace -> (aws) ESO store + ExternalSecrets, wait for ESO to populate the in-cluster Secrets -> secrets -> migrations job (waits) -> api -> react -> the cloud's ingress.
 4. Prints the load balancer URL (ALB `load-balancer-ingress-controller` annotation on AWS; App Gateway `fqdn` output on Azure).
 
-**Secrets differ by cloud.** On **Azure** the DB password + image API key are baked into the `secrets.yaml` Secrets (rendered from `<env>.secrets.env`). On **AWS** they live in **Secrets Manager** and are synced into the cluster at runtime by **External Secrets Operator** (`aws/k8s/secretstore.yaml` + `external-secret.yaml`); the DB login's username + password are pulled from the `template-<env>-db` secret and the connection string is assembled by an ESO v2 template, so the password never enters the manifests or the CD workflow. The two clouds also differ in the ingress (ALB annotations vs. the AGIC `IngressClass`), which is why the ingress lives in `<cloud>/k8s/` rather than `common/k8s/`.
+**Secrets differ by cloud.** On **Azure** the DB password + image API key are baked into the `secrets.yaml` Secrets (rendered from `<env>.secrets.env`). On **AWS** they live in **Secrets Manager** and are synced into the cluster at runtime by **External Secrets Operator** (`aws/k8s/secretstore.yaml` + `external-secret.yaml`); the DB login's username + password are pulled from the `<env>-template-db` secret and the connection string is assembled by an ESO v2 template, so the password never enters the manifests or the CD workflow. The two clouds also differ in the ingress (ALB annotations vs. the AGIC `IngressClass`), which is why the ingress lives in `<cloud>/k8s/` rather than `common/k8s/`.
 
 ---
 
@@ -275,11 +277,11 @@ Builds the `template-deployment-ci` tools image once (terraform, shellcheck, pyt
 
     ```sh
     cp common/k8s/environments/dev.env.example common/k8s/environments/dev.env
-    #    IMAGE_API_URL=(aws ssm get-parameter --name /template/dev/image-api-url --query Parameter.Value --output text),
+    #    IMAGE_API_URL=(aws ssm get-parameter --name /dev/template/image-api-url --query Parameter.Value --output text),
     #    RDS_ENDPOINT=(terraform output -raw rds_endpoint)
     ```
 
-    The DB login (username + password) is not in the env file on AWS — ESO reads it from the `template-dev-db` secret and builds the connection string.
+    The DB login (username + password) is not in the env file on AWS — ESO reads it from the `dev-template-db` secret and builds the connection string.
 
 5. **Deploy** (the cloud argument is what picks the ALB ingress overlay + the ESO path):
 
@@ -317,7 +319,7 @@ Required per environment (repo settings -> Secrets & variables -> Actions):
 | ---- | ------------------ | ---------------------------------------- |
 | Var  | `AWS_ROLE_ARN_DEV` | `terraform output -raw cd_role_arn`      |
 
-That is the **only** per-env GitHub value. The DB login (app or master) + image API key are in Secrets Manager (synced by ESO) and the image API URL is in SSM Parameter Store (`/template/<env>/image-api-url`), all created by `terraform apply`. `dev`/`qa`/`prod` all follow this pattern: each has an `aws/terraform/environments/<env>` and one `AWS_ROLE_ARN_<ENV>` variable.
+That is the **only** per-env GitHub value. The DB login (app or master) + image API key are in Secrets Manager (synced by ESO) and the image API URL is in SSM Parameter Store (`/<env>/template/image-api-url`), all created by `terraform apply`. `dev`/`qa`/`prod` all follow this pattern: each has an `aws/terraform/environments/<env>` and one `AWS_ROLE_ARN_<ENV>` variable.
 
 No kubeconfig secret: kubectl authenticates through the OIDC role (`aws eks update-kubeconfig` mints short-lived tokens per request). The cluster runs in EKS **API auth mode** (access entries, not the legacy `aws-auth` ConfigMap): the `eks` module sets `access_config.authentication_mode = "API"` and creates an access entry for the CD role in a custom `admins` group (EKS rejects any access-entry group starting with `system:`, so `system:masters` is not usable). EKS auto-creates the node-role entry for the managed node group. Cluster-admin for the CD role is granted by the `cd-admins` ClusterRoleBinding (`aws/k8s/cd-admin.yaml`, applied by `deploy.sh`) that binds the built-in `cluster-admin` ClusterRole to the `admins` group. Note the auth-mode change is one-way (`CONFIG_MAP` -> `API_AND_CONFIG_MAP` -> `API`) and in-place (no cluster replacement); `bootstrap_cluster_creator_admin_permissions` is pinned to `true` to avoid a provider recreation bug (hashicorp/terraform-provider-aws#38967).
 
