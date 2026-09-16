@@ -31,7 +31,7 @@ variable "private_subnet_cidrs" {
 variable "kubernetes_version" {
   description = "EKS Kubernetes version (major.minor)"
   type        = string
-  default     = "1.35"
+  default     = "1.36"
 }
 
 # ----- prod node profile (HA: one node per AZ) -----
@@ -81,7 +81,7 @@ variable "db_instance_class" {
 }
 
 variable "db_master_password" {
-  description = "RDS master password. Stored in the template-prod-db-master secret. Never in GitHub"
+  description = "RDS master password. Stored in the prod-template-db-master secret. Never in GitHub"
   type        = string
   sensitive   = true
 }
@@ -93,7 +93,7 @@ variable "db_app_username" {
 }
 
 variable "db_app_password" {
-  description = "Dedicated app login password. Stored in the template-prod-db secret"
+  description = "Dedicated app login password. Stored in the prod-template-db secret"
   type        = string
   sensitive   = true
 }
@@ -131,11 +131,11 @@ variable "db_skip_final_snapshot" {
 variable "db_final_snapshot_identifier" {
   description = "RDS final snapshot identifier (required because skip_final_snapshot is false)"
   type        = string
-  default     = "template-prod-db-final"
+  default     = "prod-template-db-final"
 }
 
 variable "image_api_key" {
-  description = "Image API key for this environment (stored in the template-prod-image-api secret)"
+  description = "Image API key for this environment (stored in the prod-template-image-api secret)"
   type        = string
   sensitive   = true
 }

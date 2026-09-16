@@ -8,10 +8,20 @@ variable "region" {
   type        = string
 }
 
+variable "environment" {
+  description = "Environment name (dev/qa/prod). Scopes the CD role's SSM read to this env's image-api-url parameter (<env>/<project>/image-api-url)"
+  type        = string
+}
+
+variable "project_name" {
+  description = "Project name (e.g. template). Scopes the CD role's SSM read to this env's image-api-url parameter (<env>/<project>/image-api-url)"
+  type        = string
+}
+
 variable "kubernetes_version" {
   description = "EKS Kubernetes version (major.minor)"
   type        = string
-  default     = "1.35"
+  default     = "1.36"
 }
 
 variable "vpc_id" {

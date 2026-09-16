@@ -31,7 +31,7 @@ variable "private_subnet_cidrs" {
 variable "kubernetes_version" {
   description = "EKS Kubernetes version (major.minor)"
   type        = string
-  default     = "1.35"
+  default     = "1.36"
 }
 
 variable "worker_instance_types" {

@@ -17,7 +17,7 @@ db_master_password = "change-me-master-password"
 # `terraform apply` + bootstrap/setup-eks.sh prod, run
 #   bash aws/bootstrap/provision-db-user.sh prod
 # to create the role in the DB (it reads the master creds from the
-# template-prod-db-master secret and the app creds from template-prod-db).
+# prod-template-db-master secret and the app creds from prod-template-db).
 db_app_username = "template_app"
 db_app_password = "change-me-app-password"
 

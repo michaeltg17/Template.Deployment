@@ -1,10 +1,15 @@
 variable "name" {
-  description = "Resource name prefix (e.g. template-dev). Secrets are named <name>-db, <name>-db-master, <name>-image-api"
+  description = "Resource name (e.g. dev-template). Secrets are named <name>-db, <name>-db-master, <name>-image-api"
   type        = string
 }
 
 variable "environment" {
-  description = "Environment name (dev/qa/prod). Used for the SSM parameter path template/<env>/image-api-url"
+  description = "Environment name (dev/qa/prod). Used for the SSM parameter path <env>/<project>/image-api-url"
+  type        = string
+}
+
+variable "project_name" {
+  description = "Project name (e.g. template). Used for the SSM parameter path <env>/<project>/image-api-url"
   type        = string
 }
 

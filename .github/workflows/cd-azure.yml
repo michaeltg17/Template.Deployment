@@ -19,6 +19,10 @@
 #            IMAGE_API_KEY_<ENV>
 #   vars:    IMAGE_API_URL_<ENV>        (image API base URL for that env)
 
+env:
+  # Project name: the suffix of every resource name (env-first: <env>-<project>)
+  PROJECT: template
+
 name: Deploy (Azure)
 
 on:
@@ -47,9 +51,9 @@ jobs:
       id-token: write
     env:
       ENV_NAME: ${{ github.event.inputs.env }}
-      RESOURCE_GROUP: template-${{ github.event.inputs.env }}-rg
-      AKS_NAME: template-${{ github.event.inputs.env }}
-      PG_NAME: template-${{ github.event.inputs.env }}-pg
+      RESOURCE_GROUP: ${{ github.event.inputs.env }}-${{ env.PROJECT }}-rg
+      AKS_NAME: ${{ github.event.inputs.env }}-${{ env.PROJECT }}
+      PG_NAME: ${{ github.event.inputs.env }}-${{ env.PROJECT }}-pg
       IMAGE_API_URL: ${{ vars['IMAGE_API_URL_' + github.event.inputs.env] }}
       DB_PASSWORD: ${{ secrets['DB_PASSWORD_' + github.event.inputs.env] }}
       IMAGE_API_KEY: ${{ secrets['IMAGE_API_KEY_' + github.event.inputs.env] }}

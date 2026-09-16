@@ -6,7 +6,7 @@
 #     <name>-db-master  {"username","password"}  - the RDS master login
 #     <name>-image-api  {"key"}                  - the image API key
 #   SSM Parameter Store (non-secret config):
-#     /template/<env>/image-api-url               - the image API base URL
+#     /<env>/<project>/image-api-url              - the image API base URL
 #
 # The pods read these at runtime via External Secrets Operator (ESO): the
 # ESO IRSA role (created by the eks module) gets GetSecretValue on the two
@@ -87,11 +87,11 @@ resource "aws_secretsmanager_secret_version" "image_api" {
 
 # SSM parameter names must be fully qualified (start with /).
 resource "aws_ssm_parameter" "image_api_url" {
-  name  = "/template/${var.environment}/image-api-url"
+  name  = "/${var.environment}/${var.project_name}/image-api-url"
   type  = "String"
   value = var.image_api_url
 
-  tags = merge(local.tags, { Name = "/template/${var.environment}/image-api-url" })
+  tags = merge(local.tags, { Name = "/${var.environment}/${var.project_name}/image-api-url" })
 }
 
 # ----- External Secrets Operator (IRSA) -----

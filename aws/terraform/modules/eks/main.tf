@@ -354,10 +354,10 @@ data "aws_iam_policy_document" "cd" {
       "ssm:GetParameter",
     ]
     # Non-secret config (the image API URL) the CD workflow renders into the
-    # env file. Wildcard region/account + the template/ path prefix keeps the
-    # eks module decoupled from the secrets module (a direct ARN reference
-    # would be a module cycle). Read-only.
-    resources = ["arn:aws:ssm:*:*:parameter/template/*"]
+    # env file. Scoped to this env's parameter (/<env>/<project>/image-api-url):
+    # envs no longer share a path prefix, so each env's role only reads its own
+    # parameter. Read-only.
+    resources = ["arn:aws:ssm:*:*:parameter/${var.environment}/${var.project_name}/*"]
   }
 }
 

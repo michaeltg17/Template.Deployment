@@ -14,6 +14,8 @@ module "eks" {
 
   name                  = local.name
   region                = var.aws_region
+  environment           = var.environment
+  project_name          = var.project_name
   kubernetes_version    = var.kubernetes_version
   vpc_id                = module.vpc.vpc_id
   vpc_cidr              = module.vpc.vpc_cidr
@@ -56,6 +58,7 @@ module "secrets" {
 
   name                    = local.name
   environment             = var.environment
+  project_name            = var.project_name
   db_master_username      = module.rds.master_username
   db_master_password      = var.db_master_password
   db_app_username         = var.db_app_username

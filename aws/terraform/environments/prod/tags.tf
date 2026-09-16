@@ -1,17 +1,17 @@
 variable "project_name" {
-  description = "Resource name prefix and Project tag (AWS resource-group equivalent)"
+  description = "Resource name suffix and Project tag (AWS resource-group equivalent)"
   type        = string
   default     = "template"
 }
 
 variable "environment" {
-  description = "Environment name (suffix of every resource name + Environment tag)"
+  description = "Environment name (prefix of every resource name + Environment tag)"
   type        = string
   default     = "prod"
 }
 
 locals {
-  name = "${var.project_name}-${var.environment}"
+  name = "${var.environment}-${var.project_name}"
 
   tags = {
     Project     = var.project_name
