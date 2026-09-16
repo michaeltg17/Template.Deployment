@@ -62,11 +62,15 @@ no_albs() { [ -z "$(alb_arns)" ]; }
 
 no_enis() {
   # The ALB's per-subnet ENIs (and their EIPs) must be released before the
-  # public subnets and the VPC can be deleted.
+  # public subnets and the VPC can be deleted. Only ELB ENIs are counted:
+  # the EKS node/control-plane, RDS and NAT-gateway ENIs also live in this
+  # VPC for the whole lifetime of the cluster, so a "zero ENIs" check would
+  # never pass while the cluster is still up.
   [ -n "$VPC_ID" ] || return 0
   local out
   out="$(aws ec2 describe-network-interfaces --region "$AWS_REGION" \
     --filters "Name=vpc-id,Values=$VPC_ID" \
+      "Name=description,Values=Amazon ELB* AWS ELB* aws elb*" \
     --query 'length(NetworkInterfaces)' --output text 2>/dev/null || echo 0)"
   [ "$out" = "0" ]
 }
