@@ -47,3 +47,13 @@ output "alb_controller_role_arn" {
   description = "IRSA role for the load balancer controller (used by bootstrap/setup-eks.sh)"
   value       = aws_iam_role.alb_controller.arn
 }
+
+output "cluster_oidc_issuer" {
+  description = "EKS cluster OIDC issuer URL (the secrets module uses it to build the ESO IRSA trust condition)"
+  value       = aws_eks_cluster.this.identity[0].oidc[0].issuer
+}
+
+output "cluster_oidc_provider_arn" {
+  description = "ARN of the EKS cluster OIDC provider (the secrets module's ESO IRSA role trusts it)"
+  value       = aws_iam_openid_connect_provider.eks.arn
+}

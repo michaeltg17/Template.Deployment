@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.0"
+      version = "~> 6.0"
     }
   }
 }
@@ -23,7 +23,7 @@ resource "aws_security_group" "cluster" {
   # Dev: open to the world; auth is enforced by IAM. Restrict to specific
   # source CIDRs before prod.
   ingress {
-    description = "EKS API (443) to kubectl/CI"
+    description = "EKS API (443) to kubectl/CD"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -84,13 +84,31 @@ resource "aws_eks_cluster" "this" {
 
   vpc_config {
     subnet_ids = var.private_subnet_ids
-    # Public API access so kubectl/helm (the aws-auth provisioner,
-    # bootstrap/setup-eks.sh, and the CD workflow) can reach the control
-    # plane from outside the VPC. Auth is still enforced by IAM (OIDC/IRSA);
-    # restrict the cluster SG ingress before prod.
+    # Public API access so kubectl/helm (bootstrap/setup-eks.sh and the CD
+    # workflow) can reach the control plane from outside the VPC. Auth is
+    # still enforced by IAM (OIDC/IRSA); restrict the cluster SG ingress
+    # before prod.
     endpoint_public_access  = true
     endpoint_private_access = true
     security_group_ids      = [aws_security_group.cluster.id]
+  }
+
+  # Access entries are the recommended mechanism to grant IAM principals
+  # Kubernetes API access (they replace the legacy aws-auth ConfigMap). In API
+  # mode only access entries are used - there is no aws-auth ConfigMap. The
+  # node-role entry is auto-created by EKS for the managed node group; the CD
+  # role entry (aws_eks_access_entry.cd) is created here. The mode change is
+  # one-way (CONFIG_MAP -> API_AND_CONFIG_MAP -> API) and in-place (no
+  # replacement).
+  #
+  # bootstrap_cluster_creator_admin_permissions MUST be set explicitly.
+  # Leaving it null makes the provider flip it true -> null when this block
+  # is added, which forces a full cluster replacement (provider bug
+  # hashicorp/terraform-provider-aws#38967). Pinning it to true keeps the
+  # change in-place.
+  access_config {
+    authentication_mode                         = "API"
+    bootstrap_cluster_creator_admin_permissions = true
   }
 
   depends_on = [
@@ -98,28 +116,12 @@ resource "aws_eks_cluster" "this" {
     aws_security_group.node,
   ]
 
-  # Apply the aws-auth ConfigMap the moment the control plane is active,
-  # BEFORE the node group boots: kubelets cannot register (and the
-  # aws_eks_node_group waiter below would stall) until the node role is
-  # mapped. Runs on the machine executing terraform (needs aws + kubectl).
+  # Set up a kubeconfig context for the cluster so the operator can use
+  # kubectl right after `terraform apply`. Uses var.name (not
+  # aws_eks_cluster.this.name): a provisioner must not reference the resource
+  # it is attached to - that forms a self-cycle.
   provisioner "local-exec" {
-    # Uses var.name (not aws_eks_cluster.this.name): a provisioner must not
-    # reference the resource it is attached to - that forms a self-cycle
-    # (X expand <-> X).
-    command = <<-EOT
-      aws eks update-kubeconfig --name ${var.name} --alias ${var.name} --region ${var.region}
-      kubectl --context ${var.name} -n kube-system apply -f - <<EOF
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: aws-auth
-      data:
-        mapRoles: |
-          - rolemarn: ${aws_iam_role.node.arn}
-            username: system:node:{{EC2PrivateDNSName}}
-            groups: ["system:bootstrappers", "system:nodes"]
-      EOF
-    EOT
+    command = "aws eks update-kubeconfig --name ${var.name} --alias ${var.name} --region ${var.region}"
   }
 
   tags = merge(local.tags, { Name = var.name })
@@ -246,10 +248,13 @@ resource "aws_eks_node_group" "this" {
 resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
-  # GitHub's token endpoint serves a Let's Encrypt chain (leaf <- YR2 <- Root
-  # YR). Include the root (canonical value STS validates) plus the YR2
-  # intermediate. Verified 2026-08-27 via the AWS-documented s_client command.
-  thumbprint_list = ["ab9d0263244dd0326eb67015705a667e79cfe998", "2d74d6dfd96eea55ad7baafa0d3c6552b2dadc37"]
+  # These MUST be the SHA-1 of the certs in GitHub's JWKS (the keys that sign
+  # the OIDC tokens), NOT the TLS server-certificate chain of the endpoint.
+  # GitHub rotates these signing certs, so refresh periodically. To recompute:
+  #   fetch https://token.actions.githubusercontent.com/.well-known/openid-configuration
+  #   -> jwks_uri -> for each key, sha1(base64decode(key.x5c[0])).hex
+  # Verified 2026-09-14 against the live JWKS.
+  thumbprint_list = ["38e9b30b3a023a1b72309921a69a42fcc496c42c", "4f3e9ad8c9a6f5eb3173006f4fa630e28f43dce9", "ca435a638a8cfed6b89364e064e08460b91c6250"]
 
   tags = local.tags
 }
@@ -273,7 +278,21 @@ data "aws_iam_policy_document" "cd_assume" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:*"]
+      # Default (empty) allows any ref on the repo; prod passes explicit
+      # ref:heads/main + ref:heads/dev patterns to pin the CD identity.
+      #
+      # Match BOTH sub formats:
+      #   classic:     repo:owner/name:ref:refs/heads/...
+      #   immutable:   repo:owner@<org-id>/name@<repo-id>:ref:refs/heads/...
+      # GitHub switched new repos (created on/after 2026-07-15) to the
+      # immutable-ID format, which a classic-only pattern never matches.
+      # The immutable pattern is only added when both numeric IDs are set.
+      values = length(var.cd_oidc_sub) > 0 ? var.cd_oidc_sub : concat(
+        ["repo:${var.github_repo}:*"],
+        (var.github_owner_id != "" && var.github_repo_id != "") ? [
+          "repo:${split("/", var.github_repo)[0]}@${var.github_owner_id}/${split("/", var.github_repo)[1]}@${var.github_repo_id}:*",
+        ] : [],
+      )
     }
   }
 }
@@ -296,15 +315,26 @@ data "aws_iam_policy_document" "cd" {
     resources = [aws_eks_cluster.this.arn]
   }
 
+  # `aws eks get-token` (the kubeconfig exec credential plugin) mints a
+  # Kubernetes token by calling sts:GetWebIdentityToken. Without it, kubectl
+  # fails with "the server has asked for the client to provide credentials".
+  # TODO(harden): scope sts:IdentityTokenAudience to this cluster's issuer.
+  statement {
+    effect    = "Allow"
+    actions   = ["sts:GetWebIdentityToken"]
+    resources = ["*"]
+  }
+
   statement {
     effect = "Allow"
     actions = [
       "rds:DescribeDBInstances",
     ]
     # Scoped to this env's DB identifier (<name>-db, created by the rds module).
+    # The RDS instance ARN uses the "db:" resource type (not "dbinstance:").
     # Wildcards only for region/account so the eks module stays decoupled from
     # the rds module (a direct ARN reference would be a module cycle).
-    resources = ["arn:aws:rds:*:*:dbinstance:${var.name}-db"]
+    resources = ["arn:aws:rds:*:*:db:${var.name}-db"]
   }
 
   statement {
@@ -317,11 +347,40 @@ data "aws_iam_policy_document" "cd" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ssm:GetParameter",
+    ]
+    # Non-secret config (the image API URL) the CD workflow renders into the
+    # env file. Wildcard region/account + the template/ path prefix keeps the
+    # eks module decoupled from the secrets module (a direct ARN reference
+    # would be a module cycle). Read-only.
+    resources = ["arn:aws:ssm:*:*:parameter/template/*"]
+  }
 }
 
 resource "aws_iam_role_policy" "cd" {
   role   = aws_iam_role.cd.id
   policy = data.aws_iam_policy_document.cd.json
+}
+
+# Access entry for the CD role (the GitHub Actions OIDC identity). In API auth
+# mode this is how the CD role gets Kubernetes API access (no aws-auth
+# ConfigMap). Only custom principals need a manual entry - EKS auto-creates
+# the node-role entry for the managed node group.
+#
+# The group is a custom "admins" group, NOT system:masters: EKS rejects any
+# access-entry group that starts with "system:". Cluster-admin is granted to
+# that group by the ClusterRoleBinding in aws/k8s/cd-admin.yaml (applied by
+# deploy.sh).
+resource "aws_eks_access_entry" "cd" {
+  cluster_name      = aws_eks_cluster.this.name
+  principal_arn     = aws_iam_role.cd.arn
+  user_name         = "cd-${var.name}"
+  type              = "STANDARD"
+  kubernetes_groups = ["admins"]
 }
 
 # ----- load balancer controller (IRSA) -----

@@ -24,6 +24,8 @@ module "eks" {
   worker_max_size       = var.worker_max_size
   worker_desired_size   = var.worker_desired_size
   github_repo           = "michaeltg17/Template.Deployment"
+  # Prod: pin the CD (deploy) identity to the main/dev branches only.
+  cd_oidc_sub = var.cd_oidc_sub
 
   tags = local.tags
 }
@@ -38,6 +40,11 @@ module "rds" {
   app_username               = var.db_app_username
   app_password               = var.db_app_password
   multi_az                   = var.db_multi_az
+  apply_immediately          = var.db_apply_immediately
+  backup_retention_period    = var.db_backup_retention_period
+  deletion_protection        = var.db_deletion_protection
+  skip_final_snapshot        = var.db_skip_final_snapshot
+  final_snapshot_identifier  = var.db_final_snapshot_identifier
   vpc_id                     = module.vpc.vpc_id
   private_subnet_ids         = module.vpc.private_subnet_ids
   vpc_cidr                   = module.vpc.vpc_cidr

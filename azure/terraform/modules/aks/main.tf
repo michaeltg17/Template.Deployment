@@ -4,7 +4,7 @@ locals {
   resource_group_scope = "/subscriptions/${data.azurerm_client_config.current.subscription_id}/resourceGroups/${var.resource_group_name}"
 }
 
-# Public API server (kubectl/CI reach it directly) + Azure CNI node-subnet
+# Public API server (kubectl/CD reach it directly) + Azure CNI node-subnet
 # model (pods share the node subnet IPs). Version is left to AKS's default
 # (latest supported for the region).
 resource "azurerm_kubernetes_cluster" "this" {
