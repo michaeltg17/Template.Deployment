@@ -1,15 +1,19 @@
-# Manual continuous deployment (Azure): deploys the app repos' (Template.Api,
-# Template.React) image tags to an AKS environment. The app repos build and push
-# ghcr images themselves (tagged <sha7> + latest); this workflow picks the sha7
-# of the app repos' main HEAD (or an explicit override) and runs
-# common/k8s/deploy.sh <env> azure.
+# Continuous deployment (Azure, GitOps): renders the app stack manifests for an
+# AKS environment and commits them to deploy/<env>/azure/. ArgoCD (installed by
+# terraform) watches that path on main and syncs it into the cluster - this
+# workflow never talks to kubectl.
+#
+# The app repos (Template.Api, Template.React) build and push ghcr images
+# themselves (tagged <sha7> + latest); this workflow picks the sha7 of the app
+# repos' main HEAD (or an explicit override) and renders the manifests with
+# those tags.
 #
 # Trigger: Actions tab -> "Deploy (Azure)" -> choose env (optionally pin tags) -> Run.
 #
 # Auth: GitHub OIDC federated to the per-env CD service principal created by
 # terraform (`terraform output -raw cd_client_id` / `cd_tenant_id`). No stored
-# kubeconfig: kubectl talks to AKS via `az aks get-credentials`. The federated
-# identity is bound to the dev + main branch refs (see modules/aks).
+# kubeconfig, no kubectl: the only cluster write is ArgoCD syncing the commit.
+# The federated identity is bound to the dev + main branch refs (see modules/aks).
 #
 # Required per env (repo settings):
 #   secrets: AZURE_CLIENT_ID_<ENV>      (from `terraform output -raw cd_client_id`)
@@ -47,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write
       id-token: write
     env:
       ENV_NAME: ${{ github.event.inputs.env }}
@@ -60,9 +64,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-
-      - name: Install kubectl
-        run: curl -fsSL https://get.k8s.io | bash
 
       - name: Configure Azure credentials (GitHub OIDC)
         uses: azure/login@v2
@@ -112,11 +113,17 @@ jobs:
             "common/k8s/environments/$ENV_NAME.env.example" > "common/k8s/environments/$ENV_NAME.env"
           printf 'DB_PASSWORD=%s\nIMAGE_API_KEY=%s\n' "$DB_PASSWORD" "$IMAGE_API_KEY" > "common/k8s/environments/$ENV_NAME.secrets.env"
 
-      - name: Configure kubectl (AKS)
-        run: |
-          az aks get-credentials --name "$AKS_NAME" --resource-group "$RESOURCE_GROUP"
-          kubectl version --client
-          kubectl get nodes
+      - name: Render manifests (GitOps - no kubectl)
+        run: bash common/k8s/render.sh "$ENV_NAME" azure "deploy/$ENV_NAME/azure"
 
-      - name: Deploy
-        run: bash common/k8s/deploy.sh "$ENV_NAME" azure
+      - name: Commit rendered manifests to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "deploy/$ENV_NAME/azure"
+          if git diff --cached --quiet; then
+            echo "No manifest changes for $ENV_NAME/azure - nothing to commit."
+            exit 0
+          fi
+          git commit -m "deploy(azure): $ENV_NAME api=$API_TAG react=$REACT_TAG"
+          git push origin HEAD:main

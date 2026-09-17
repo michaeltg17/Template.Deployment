@@ -78,6 +78,11 @@ module "secrets" {
   tags = local.tags
 }
 
+# ArgoCD (GitOps) lives in its own terraform state (./argocd) so it can read
+# the cluster after it exists (the helm/kubernetes providers need a live API
+# endpoint, which does not exist during the first apply of this state). It
+# reads the cluster from this state's outputs via terraform_remote_state.
+
 # Kubernetes API access uses EKS access entries (not the legacy aws-auth
 # ConfigMap). The eks module sets the cluster to API auth mode and creates an
 # access entry for the CD role (group "admins"); EKS auto-creates the node-role

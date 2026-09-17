@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in:  cp terraform.tfvars.example terraform.tfvars
+# terraform.tfvars is gitignored.
+
+# ArgoCD repo token: a GitHub PAT with contents:read on THIS repo only
+# (Settings -> Developer settings -> Personal access tokens -> fine-grained).
+# ArgoCD uses it to clone the rendered manifests from deploy/<env>/azure/.
+argocd_repo_token = "change-me-ghp-pat"

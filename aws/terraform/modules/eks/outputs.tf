@@ -43,6 +43,16 @@ output "cd_role_arn" {
   value       = aws_iam_role.cd.arn
 }
 
+output "plan_role_arn" {
+  description = "GitHub Actions OIDC role ARN for the read-only `terraform plan` CI job (any ref)"
+  value       = aws_iam_role.plan.arn
+}
+
+output "apply_role_arn" {
+  description = "GitHub Actions OIDC role ARN for the `terraform apply` CI job (main ref + workflow_dispatch only)"
+  value       = aws_iam_role.apply.arn
+}
+
 output "alb_controller_role_arn" {
   description = "IRSA role for the load balancer controller (used by bootstrap/setup-eks.sh)"
   value       = aws_iam_role.alb_controller.arn

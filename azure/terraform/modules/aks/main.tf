@@ -114,3 +114,84 @@ resource "azurerm_role_assignment" "cd_aks" {
   role_definition_name = "Azure Kubernetes Service Contributor Role"
   principal_id         = azurerm_user_assigned_identity.cd.principal_id
 }
+
+# --- Terraform plan/apply identities (pipeline-driven IaC) ---
+# Two more user-assigned identities federated to GitHub OIDC:
+#   tf-plan:  Reader on the resource group, for `terraform plan` on every PR.
+#             The plan job runs on the pull_request event, whose OIDC subject
+#             is `repo:<owner>/<name>:pull_request` (one credential covers all
+#             PRs, from any branch - Azure federated credentials are exact
+#             matches, no wildcards).
+#   tf-apply: Contributor on the resource group, for `terraform apply` from
+#             main (push) and workflow_dispatch (prod button).
+#
+# First-apply bootstrap: the tf-apply identity needs Contributor to create the
+# ArgoCD RBAC in the cluster (see the argocd module), which it does not have on
+# the very first apply. Run the first apply with a local `az login` that has
+# Contributor (the identity is created by that same apply); CI applies work
+# from the second apply onward.
+
+resource "azurerm_user_assigned_identity" "tf_plan" {
+  name                = "${var.name}-tf-plan"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+
+  tags = merge(local.tags, { Name = "${var.name}-tf-plan" })
+}
+
+resource "azurerm_federated_identity_credential" "tf_plan" {
+  name                      = "${var.name}-tf-plan-pr"
+  user_assigned_identity_id = azurerm_user_assigned_identity.tf_plan.id
+  issuer                    = local.github_oidc_issuer
+  subject                   = "repo:${var.github_repo}:pull_request"
+  audience                  = ["api://AzureADTokenExchange"]
+}
+
+resource "azurerm_role_assignment" "tf_plan_reader" {
+  scope                = local.resource_group_scope
+  role_definition_name = "Reader"
+  principal_id         = azurerm_user_assigned_identity.tf_plan.principal_id
+}
+
+# Reader is not enough to read the cluster's kube_config (the argocd module's
+# data source calls listClusterUserCredentials, an action): the generic Reader
+# role only grants */read. This built-in AKS role grants exactly that read.
+resource "azurerm_role_assignment" "tf_plan_aks_user" {
+  scope                = local.resource_group_scope
+  role_definition_name = "Azure Kubernetes Service Cluster User Role"
+  principal_id         = azurerm_user_assigned_identity.tf_plan.principal_id
+}
+
+resource "azurerm_user_assigned_identity" "tf_apply" {
+  name                = "${var.name}-tf-apply"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+
+  tags = merge(local.tags, { Name = "${var.name}-tf-apply" })
+}
+
+resource "azurerm_federated_identity_credential" "tf_apply" {
+  for_each = toset(var.cd_branches)
+
+  name                      = "${var.name}-tf-apply-${each.value}"
+  user_assigned_identity_id = azurerm_user_assigned_identity.tf_apply.id
+  issuer                    = local.github_oidc_issuer
+  subject                   = "repo:${var.github_repo}:ref:refs/heads/${each.value}"
+  audience                  = ["api://AzureADTokenExchange"]
+}
+
+# workflow_dispatch (the prod apply button) presents no ref: subject is the
+# bare repo.
+resource "azurerm_federated_identity_credential" "tf_apply_dispatch" {
+  name                      = "${var.name}-tf-apply-dispatch"
+  user_assigned_identity_id = azurerm_user_assigned_identity.tf_apply.id
+  issuer                    = local.github_oidc_issuer
+  subject                   = "repo:${var.github_repo}"
+  audience                  = ["api://AzureADTokenExchange"]
+}
+
+resource "azurerm_role_assignment" "tf_apply_contributor" {
+  scope                = local.resource_group_scope
+  role_definition_name = "Contributor"
+  principal_id         = azurerm_user_assigned_identity.tf_apply.principal_id
+}

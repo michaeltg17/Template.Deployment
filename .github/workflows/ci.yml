@@ -3,6 +3,8 @@ name: ci
 on:
   push:
     branches: [main, dev]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -18,6 +20,75 @@ jobs:
 
       - name: Run CI checks in docker
         run: bash common/ci-docker.sh
+
+  # Plan (read-only) on every PR to main, for each cloud + env. The plan role
+  # is assumable from any ref (AWS) / the pull_request event (Azure), so this
+  # never needs the apply identity. The plan job plans BOTH the main state and
+  # the argocd state (the argocd state reads the cluster from the main state).
+  #
+  # The role ARN / MI client id are repo vars + secrets, populated once after
+  # the first (local) apply from `terraform output` - see the workflow header
+  # comments in apply-infra.yml.
+  terraform-plan:
+    needs: validate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cloud: aws,   env: dev }
+          - { cloud: aws,   env: qa }
+          - { cloud: aws,   env: prod }
+          - { cloud: azure, env: dev }
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+
+      - name: Configure AWS credentials (GitHub OIDC, plan role)
+        if: matrix.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars[format('AWS_PLAN_ROLE_ARN_{0}', matrix.env)] }}
+          aws-region: us-east-1
+
+      - name: Configure Azure credentials (GitHub OIDC, tf-plan MI)
+        if: matrix.cloud == 'azure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets[format('AZURE_TF_PLAN_CLIENT_ID_{0}', matrix.env)] }}
+          tenant-id: ${{ secrets[format('AZURE_TENANT_ID_{0}', matrix.env)] }}
+          subscription-id: ${{ secrets[format('AZURE_SUBSCRIPTION_ID_{0}', matrix.env)] }}
+
+      - name: Plan main state
+        working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -no-color | tee "plan-${{ matrix.cloud }}-${{ matrix.env }}-main.out"
+
+      - name: Plan argocd state (reads cluster from main state)
+        working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}/argocd
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -no-color | tee "plan-${{ matrix.cloud }}-${{ matrix.env }}-argocd.out"
+
+      - name: Upload plan output
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-${{ matrix.cloud }}-${{ matrix.env }}
+          path: |
+            ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}/plan-*.out
+            ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}/argocd/plan-*.out
+          if-no-files-found: warn
 
   release:
     needs: validate

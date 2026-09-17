@@ -132,7 +132,16 @@ if [ -n "$VPC_ID" ]; then
   done
 fi
 
-echo "==> terraform destroy"
+# ArgoCD lives in its own state (<env>/argocd) and connects to the cluster via
+# helm/kubernetes providers - it must be destroyed BEFORE the main state, while
+# the cluster is still up (so the helm uninstall of ArgoCD can reach the API).
+ARGOCD_TF_DIR="$TF_DIR/argocd"
+if [ -d "$ARGOCD_TF_DIR" ]; then
+  echo "==> terraform destroy (argocd state - uninstalls ArgoCD)"
+  terraform -chdir="$ARGOCD_TF_DIR" destroy -auto-approve
+fi
+
+echo "==> terraform destroy (main state)"
 terraform -chdir="$TF_DIR" destroy -auto-approve
 
 echo "==> verifying nothing is left"

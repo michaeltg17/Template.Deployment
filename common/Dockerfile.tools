@@ -1,0 +1,63 @@
+# Developer tooling image: one reproducible Linux environment for running this
+# repo's scripts (bootstrap, deploy, teardown, CI) on any host (Windows,
+# macOS, Linux). Run it with common/tools-docker.sh, e.g.:
+#
+#   bash common/tools-docker.sh -c "bash aws/bootstrap/setup-eks.sh dev"
+#
+# Versions are pinned deliberately - bump the ARGs together, on purpose.
+FROM ubuntu:24.04
+
+ARG TERRAFORM_VERSION=1.15.8
+ARG KUBECTL_VERSION=v1.36.3
+ARG HELM_VERSION=v3.22.0
+ARG AWSCLI_VERSION=2.34.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        jq \
+        unzip \
+        git \
+        openssh-client \
+        python3 \
+        python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# terraform (pinned)
+RUN curl -fsSL -o /tmp/terraform.zip \
+        "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
+    && unzip -q /tmp/terraform.zip -d /usr/local/bin \
+    && rm /tmp/terraform.zip
+
+# kubectl (pinned; matches the EKS 1.36 clusters - kubectl skew policy allows
+# +/-1 minor, so this also works on AKS's newer defaults)
+RUN curl -fsSL -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl
+
+# helm (pinned; v3, same major as bootstrap/setup-eks.sh's get-helm-3)
+RUN curl -fsSL -o /tmp/helm.tgz \
+        "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+    && tar -xzf /tmp/helm.tgz -C /tmp \
+    && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
+    && rm -rf /tmp/helm.tgz /tmp/linux-amd64
+
+# aws cli v2 (pinned)
+RUN curl -fsSL -o /tmp/awscli.zip \
+        "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" \
+    && unzip -q /tmp/awscli.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/aws /tmp/awscli.zip
+
+# az cli (latest stable; Microsoft's official install script)
+RUN curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash
+
+# python deps used by the repo's scripts (env-file parsing, yaml checks)
+RUN pip3 install --no-cache-dir --break-system-packages pyyaml
+
+# Sanity-check the pinned tools
+RUN terraform version && kubectl version --client && helm version --short \
+    && aws --version && az version --output tsv
