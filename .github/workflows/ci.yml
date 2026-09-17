@@ -21,14 +21,17 @@ jobs:
       - name: Run CI checks in docker
         run: bash common/ci-docker.sh
 
-  # Plan (read-only) on every PR to main, for each cloud + env. The plan role
-  # is assumable from any ref (AWS) / the pull_request event (Azure), so this
-  # never needs the apply identity. The plan job plans BOTH the main state and
-  # the argocd state (the argocd state reads the cluster from the main state).
+  # Plan (read-only) on every PR to main, for each cloud + env. The plan
+  # identity is assumable from any ref (AWS) / the pull_request event (Azure),
+  # so this never needs the apply identity. The plan job plans BOTH the main
+  # state and the argocd state (the argocd state reads the cluster from the
+  # main state).
   #
-  # The role ARN / MI client id are repo vars + secrets, populated once after
-  # the first (local) apply from `terraform output` - see the workflow header
-  # comments in apply-infra.yml.
+  # The plan identity is a repo var (AWS role ARN) / secret (Azure MI client
+  # id), populated once after the first (local) apply of that env from
+  # `terraform output`. Until an env is bootstrapped (roles created + var/secret
+  # set), its plan row SKIPS (green) rather than failing - an env that has no
+  # infrastructure yet has no plan role to assume.
   terraform-plan:
     needs: validate
     if: github.event_name == 'pull_request'
@@ -49,20 +52,44 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      # Resolve the plan identity reference. If the env hasn't been
+      # bootstrapped yet (no plan role / MI created, so the var/secret is
+      # empty), set PLAN=skip and the rest of the job is skipped (green).
+      - name: Resolve plan identity
+        id: gate
+        env:
+          AWS_PLAN_ROLE_ARN: ${{ vars[format('AWS_PLAN_ROLE_ARN_{0}', matrix.env)] }}
+          AZURE_TF_PLAN_CLIENT_ID: ${{ secrets[format('AZURE_TF_PLAN_CLIENT_ID_{0}', matrix.env)] }}
+        run: |
+          if [ "${{ matrix.cloud }}" = "aws" ]; then
+            ref="$AWS_PLAN_ROLE_ARN"
+            hint="set the repo variable AWS_PLAN_ROLE_ARN_${{ matrix.env }} (terraform output -raw plan_role_arn after the first apply)"
+          else
+            ref="$AZURE_TF_PLAN_CLIENT_ID"
+            hint="set the repo secret AZURE_TF_PLAN_CLIENT_ID_${{ matrix.env }} (terraform output -raw tf_plan_client_id after the first apply)"
+          fi
+          if [ -z "$ref" ]; then
+            echo "plan identity for ${{ matrix.cloud }}/${{ matrix.env }} is not set - skipping (env not bootstrapped yet: $hint)"
+            echo "plan=skip" >> "$GITHUB_OUTPUT"
+          else
+            echo "plan=run" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Terraform
+        if: steps.gate.outputs.plan == 'run'
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.15.8
 
       - name: Configure AWS credentials (GitHub OIDC, plan role)
-        if: matrix.cloud == 'aws'
+        if: steps.gate.outputs.plan == 'run' && matrix.cloud == 'aws'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars[format('AWS_PLAN_ROLE_ARN_{0}', matrix.env)] }}
           aws-region: us-east-1
 
       - name: Configure Azure credentials (GitHub OIDC, tf-plan MI)
-        if: matrix.cloud == 'azure'
+        if: steps.gate.outputs.plan == 'run' && matrix.cloud == 'azure'
         uses: azure/login@v2
         with:
           client-id: ${{ secrets[format('AZURE_TF_PLAN_CLIENT_ID_{0}', matrix.env)] }}
@@ -70,18 +97,21 @@ jobs:
           subscription-id: ${{ secrets[format('AZURE_SUBSCRIPTION_ID_{0}', matrix.env)] }}
 
       - name: Plan main state
+        if: steps.gate.outputs.plan == 'run'
         working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}
         run: |
           terraform init -input=false
           terraform plan -input=false -no-color | tee "plan-${{ matrix.cloud }}-${{ matrix.env }}-main.out"
 
       - name: Plan argocd state (reads cluster from main state)
+        if: steps.gate.outputs.plan == 'run'
         working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}/argocd
         run: |
           terraform init -input=false
           terraform plan -input=false -no-color | tee "plan-${{ matrix.cloud }}-${{ matrix.env }}-argocd.out"
 
       - name: Upload plan output
+        if: steps.gate.outputs.plan == 'run'
         uses: actions/upload-artifact@v4
         with:
           name: plan-${{ matrix.cloud }}-${{ matrix.env }}

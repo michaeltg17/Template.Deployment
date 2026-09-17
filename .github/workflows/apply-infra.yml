@@ -81,20 +81,46 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
+      # Resolve the apply identity. If the env hasn't been bootstrapped yet (no
+      # apply role / MI created, so the var/secret is empty), set APPLY=skip and
+      # the rest of the job is skipped (green). The first apply of a brand-new
+      # env is local (it creates the apply identity); CI applies from the second
+      # apply onward, once the var/secret is set.
+      - name: Resolve apply identity
+        id: gate
+        env:
+          AWS_APPLY_ROLE_ARN: ${{ vars[format('AWS_APPLY_ROLE_ARN_{0}', matrix.env)] }}
+          AZURE_TF_APPLY_CLIENT_ID: ${{ secrets[format('AZURE_TF_APPLY_CLIENT_ID_{0}', matrix.env)] }}
+        run: |
+          if [ "${{ matrix.cloud }}" = "aws" ]; then
+            ref="$AWS_APPLY_ROLE_ARN"
+            hint="set the repo variable AWS_APPLY_ROLE_ARN_${{ matrix.env }} (terraform output -raw apply_role_arn after the first apply)"
+          else
+            ref="$AZURE_TF_APPLY_CLIENT_ID"
+            hint="set the repo secret AZURE_TF_APPLY_CLIENT_ID_${{ matrix.env }} (terraform output -raw tf_apply_client_id after the first apply)"
+          fi
+          if [ -z "$ref" ]; then
+            echo "apply identity for ${{ matrix.cloud }}/${{ matrix.env }} is not set - skipping (env not bootstrapped yet: $hint)"
+            echo "apply=skip" >> "$GITHUB_OUTPUT"
+          else
+            echo "apply=run" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Terraform
+        if: steps.gate.outputs.apply == 'run'
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.15.8
 
       - name: Configure AWS credentials (GitHub OIDC, apply role)
-        if: matrix.cloud == 'aws'
+        if: steps.gate.outputs.apply == 'run' && matrix.cloud == 'aws'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars[format('AWS_APPLY_ROLE_ARN_{0}', matrix.env)] }}
           aws-region: us-east-1
 
       - name: Configure Azure credentials (GitHub OIDC, tf-apply MI)
-        if: matrix.cloud == 'azure'
+        if: steps.gate.outputs.apply == 'run' && matrix.cloud == 'azure'
         uses: azure/login@v2
         with:
           client-id: ${{ secrets[format('AZURE_TF_APPLY_CLIENT_ID_{0}', matrix.env)] }}
@@ -102,12 +128,14 @@ jobs:
           subscription-id: ${{ secrets[format('AZURE_SUBSCRIPTION_ID_{0}', matrix.env)] }}
 
       - name: Apply main state
+        if: steps.gate.outputs.apply == 'run'
         working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}
         run: |
           terraform init -input=false
           terraform apply -input=false -auto-approve -no-color
 
       - name: Apply argocd state (reads cluster from main state)
+        if: steps.gate.outputs.apply == 'run'
         working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}/argocd
         run: |
           terraform init -input=false
