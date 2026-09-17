@@ -27,24 +27,27 @@ jobs:
   # state and the argocd state (the argocd state reads the cluster from the
   # main state).
   #
-  # The plan identity is a repo var (AWS role ARN) / secret (Azure MI client
-  # id), populated once after the first (local) apply of that env from
-  # `terraform output`. Until an env is bootstrapped (roles created + var/secret
-  # set) its plan row FAILS (red) on purpose - this is an intentional,
-  # non-blocking signal that the env still needs its one-time local bootstrap.
-  # Once the env exists, add this check to branch protection as required.
+  # Each leg runs under the <env>-<cloud> GitHub environment (dev-aws, qa-aws,
+  # prod-aws, dev-azure). The plan identity is an environment variable (AWS
+  # role ARN) / secret (Azure MI client id) stored under that environment,
+  # populated once after the first (local) apply of that env from `terraform
+  # output`. Until an env is bootstrapped its plan row FAILS (red) on purpose -
+  # an intentional, non-blocking signal that the one-time local bootstrap is
+  # still needed. Once the env exists, add this check to branch protection as
+  # required (and set required reviewers on the environment if desired).
   terraform-plan:
     needs: validate
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    environment: ${{ matrix.env }}-${{ matrix.cloud }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { cloud: aws,   env: dev }
-          - { cloud: aws,   env: qa }
-          - { cloud: aws,   env: prod }
-          - { cloud: azure, env: dev }
+          - { env: dev,   cloud: aws }
+          - { env: qa,    cloud: aws }
+          - { env: prod,  cloud: aws }
+          - { env: dev,   cloud: azure }
     permissions:
       contents: read
       id-token: write
@@ -62,16 +65,16 @@ jobs:
         if: matrix.cloud == 'aws'
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars[format('AWS_PLAN_ROLE_ARN_{0}', matrix.env)] }}
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Configure Azure credentials (GitHub OIDC, tf-plan MI)
         if: matrix.cloud == 'azure'
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets[format('AZURE_TF_PLAN_CLIENT_ID_{0}', matrix.env)] }}
-          tenant-id: ${{ secrets[format('AZURE_TENANT_ID_{0}', matrix.env)] }}
-          subscription-id: ${{ secrets[format('AZURE_SUBSCRIPTION_ID_{0}', matrix.env)] }}
+          client-id: ${{ secrets.AZURE_TF_PLAN_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Plan main state
         working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}

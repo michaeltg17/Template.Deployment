@@ -315,12 +315,12 @@ Each env's ArgoCD install lives in a **separate Terraform state** (`<env>/argocd
 
     The tfvars hold the secrets that Terraform pushes into **Secrets Manager** (the app/master DB login + the image API key) and **SSM Parameter Store** (the image API URL). There is no manual "copy the password into a GitHub secret" step: the values go straight into AWS, and the pods + CD read them from there. (On `prod`, the tfvars also set the dedicated `db_app_username` / `db_app_password`.)
 
-    This apply also creates the **plan / apply / CD IAM roles** (GitHub OIDC) and exports their ARNs. Capture them now - they are the per-env GitHub values the CI/CD workflows need (see step 7):
+    This apply also creates the **plan / apply / CD IAM roles** (GitHub OIDC) and exports their ARNs. Capture them now - they are the per-env GitHub values the CI/CD workflows need, stored under the `dev-aws` environment (see the table below):
 
     ```sh
-    terraform output -raw plan_role_arn    # -> repo var  AWS_PLAN_ROLE_ARN_DEV
-    terraform output -raw apply_role_arn   # -> repo var  AWS_APPLY_ROLE_ARN_DEV
-    terraform output -raw cd_role_arn      # -> repo var  AWS_ROLE_ARN_DEV
+    terraform output -raw plan_role_arn    # -> dev-aws var  AWS_PLAN_ROLE_ARN
+    terraform output -raw apply_role_arn   # -> dev-aws var  AWS_APPLY_ROLE_ARN
+    terraform output -raw cd_role_arn      # -> dev-aws var  AWS_ROLE_ARN
     ```
 
 2b. **Install ArgoCD** (separate state - reads the cluster from the main state above):
@@ -382,15 +382,15 @@ The app repos (`Template.Api`, `Template.React`) build and push their ghcr image
 2. GitHub -> **Actions** -> **Deploy (AWS)** (`.github/workflows/cd-aws.yml`) -> choose `env` -> **Run workflow**.
 3. The workflow assumes the env's read-only CD OIDC role, resolves the `sha7` of the app repos' `main` HEAD (or a specific `sha7` from the optional `api_tag` / `react_tag` fields, to pin or roll back), resolves the RDS endpoint via the aws CLI and the image API URL from SSM Parameter Store, renders the manifests with `common/k8s/render.sh` into `deploy/<env>/aws/`, and **commits** that to `main`. **ArgoCD** then detects the commit and syncs it into the cluster - the migrations Job runs first (`PreSync` hook) and the deployments roll. The DB password + image API key are never in GitHub: ESO reads them from Secrets Manager at runtime.
 
-Required per environment (repo settings -> Secrets & variables -> Actions), all from `terraform output` after the first apply:
+Required per environment, stored under the `<env>-aws` GitHub environment (Settings -> Environments -> `<env>-aws` -> Variables), all from `terraform output` after the first apply:
 
-| Type | Name                     | Value                                        |
-| ---- | ------------------------ | -------------------------------------------- |
-| Var  | `AWS_ROLE_ARN_DEV`       | `terraform output -raw cd_role_arn`          |
-| Var  | `AWS_PLAN_ROLE_ARN_DEV`  | `terraform output -raw plan_role_arn`        |
-| Var  | `AWS_APPLY_ROLE_ARN_DEV` | `terraform output -raw apply_role_arn`       |
+| Type | Name                | Value                                    |
+| ---- | ------------------- | ---------------------------------------- |
+| Var  | `AWS_ROLE_ARN`      | `terraform output -raw cd_role_arn`      |
+| Var  | `AWS_PLAN_ROLE_ARN` | `terraform output -raw plan_role_arn`    |
+| Var  | `AWS_APPLY_ROLE_ARN`| `terraform output -raw apply_role_arn`   |
 
-The CD role is what `Deploy (AWS)` uses (read-only: it resolves the RDS endpoint + image API URL). The plan/apply roles are what the `terraform-plan` (PR) and `apply-infra` (main) jobs use. The DB login (app or master) + image API key are in Secrets Manager (synced by ESO) and the image API URL is in SSM Parameter Store (`/<env>/template/image-api-url`), all created by `terraform apply`. `dev`/`qa`/`prod` all follow this pattern: each has an `aws/terraform/environments/<env>` (and `<env>/argocd/`) and the three role-ARN variables above.
+The CD role is what `Deploy (AWS)` uses (read-only: it resolves the RDS endpoint + image API URL). The plan/apply roles are what the `terraform-plan` (PR) and `apply-infra` (main) jobs use. The DB login (app or master) + image API key are in Secrets Manager (synced by ESO) and the image API URL is in SSM Parameter Store (`/<env>/template/image-api-url`), all created by `terraform apply`. `dev`/`qa`/`prod` all follow this pattern: each has an `aws/terraform/environments/<env>` (and `<env>/argocd/`) and the `<env>-aws` environment holding the three role-ARN variables above.
 
 No kubeconfig secret: kubectl authenticates through the OIDC role (`aws eks update-kubeconfig` mints short-lived tokens per request). The cluster runs in EKS **API auth mode** (access entries, not the legacy `aws-auth` ConfigMap): the `eks` module sets `access_config.authentication_mode = "API"` and creates an access entry for the CD role in a custom `admins` group (EKS rejects any access-entry group starting with `system:`, so `system:masters` is not usable). EKS auto-creates the node-role entry for the managed node group. Cluster-admin for the CD role is granted by the `cd-admins` ClusterRoleBinding (`aws/k8s/cd-admin.yaml`, applied by `deploy.sh`) that binds the built-in `cluster-admin` ClusterRole to the `admins` group. Note the auth-mode change is one-way (`CONFIG_MAP` -> `API_AND_CONFIG_MAP` -> `API`) and in-place (no cluster replacement); `bootstrap_cluster_creator_admin_permissions` is pinned to `true` to avoid a provider recreation bug (hashicorp/terraform-provider-aws#38967).
 
@@ -465,15 +465,15 @@ Re-deploying later is: `terraform apply` (main state) -> `terraform apply` in `<
    terraform apply
    ```
 
-    `pg_password` in `terraform.tfvars` MUST equal `DB_PASSWORD` in the Azure secrets (below).
+     `pg_password` in `terraform.tfvars` MUST equal `DB_PASSWORD` in the `dev-azure` environment secrets (below).
 
-    This apply also creates the **tf-plan / tf-apply / CD user-assigned managed identities** (each with a GitHub OIDC federated credential) and exports their client ids. Capture them now - they are the per-env GitHub secrets the CI/CD workflows need (see the CD section):
+     This apply also creates the **tf-plan / tf-apply / CD user-assigned managed identities** (each with a GitHub OIDC federated credential) and exports their client ids. Capture them now - they are the per-env GitHub secrets the CI/CD workflows need, stored under the `dev-azure` environment (see the table below):
 
-    ```sh
-    terraform output -raw cd_client_id         # -> repo secret AZURE_CLIENT_ID_DEV
-    terraform output -raw tf_plan_client_id    # -> repo secret AZURE_TF_PLAN_CLIENT_ID_DEV
-    terraform output -raw tf_apply_client_id   # -> repo secret AZURE_TF_APPLY_CLIENT_ID_DEV
-    ```
+     ```sh
+     terraform output -raw cd_client_id         # -> dev-azure secret AZURE_CLIENT_ID
+     terraform output -raw tf_plan_client_id    # -> dev-azure secret AZURE_TF_PLAN_CLIENT_ID
+     terraform output -raw tf_apply_client_id   # -> dev-azure secret AZURE_TF_APPLY_CLIENT_ID
+     ```
 
 2b. **Install ArgoCD** (separate state - reads the cluster from the main state above):
 
@@ -524,18 +524,18 @@ Re-deploying later is: `terraform apply` (main state) -> `terraform apply` in `<
 
 GitHub -> **Actions** -> **Deploy (Azure)** (`.github/workflows/cd-azure.yml`) -> choose `env` -> **Run workflow**. The workflow authenticates with a **user-assigned managed identity** (created by Terraform) whose federated credential trusts this repo's `main`/`dev` branches, resolves the `sha7` of the app repos' `main` HEAD (or a specific `sha7` from `api_tag` / `react_tag`), resolves the PostgreSQL FQDN + user via the az CLI, renders the env files + manifests with `common/k8s/render.sh` into `deploy/<env>/azure/`, and **commits** that to `main`. **ArgoCD** then syncs the commit into the cluster (migrations Job first, via the `PreSync` hook).
 
-Required per environment (repo settings -> Secrets & variables -> Actions):
+Required per environment, stored under the `<env>-azure` GitHub environment (Settings -> Environments -> `<env>-azure` -> Secrets / Variables):
 
-| Type   | Name                            | Value                                                        |
-| ------ | ------------------------------- | ------------------------------------------------------------ |
-| Secret | `AZURE_TENANT_ID_DEV`           | tenant id (the one Terraform provisions into, or `terraform output -raw cd_tenant_id`) |
-| Secret | `AZURE_SUBSCRIPTION_ID_DEV`     | subscription id                                              |
-| Secret | `AZURE_CLIENT_ID_DEV`           | `terraform output -raw cd_client_id` (the CD MI client id)   |
-| Secret | `AZURE_TF_PLAN_CLIENT_ID_DEV`   | `terraform output -raw tf_plan_client_id` (terraform-plan job) |
-| Secret | `AZURE_TF_APPLY_CLIENT_ID_DEV`  | `terraform output -raw tf_apply_client_id` (apply-infra job) |
-| Secret | `DB_PASSWORD_DEV`               | PG server password (must match `pg_password` in tfvars)      |
-| Secret | `IMAGE_API_KEY_DEV`             | image API key for this env                                    |
-| Var    | `IMAGE_API_URL_DEV`             | image API base URL for this env                               |
+| Type   | Name                       | Value                                                        |
+| ------ | -------------------------- | ------------------------------------------------------------ |
+| Secret | `AZURE_TENANT_ID`          | tenant id (the one Terraform provisions into, or `terraform output -raw cd_tenant_id`) |
+| Secret | `AZURE_SUBSCRIPTION_ID`    | subscription id                                              |
+| Secret | `AZURE_CLIENT_ID`          | `terraform output -raw cd_client_id` (the CD MI client id)   |
+| Secret | `AZURE_TF_PLAN_CLIENT_ID`  | `terraform output -raw tf_plan_client_id` (terraform-plan job) |
+| Secret | `AZURE_TF_APPLY_CLIENT_ID` | `terraform output -raw tf_apply_client_id` (apply-infra job) |
+| Secret | `DB_PASSWORD`              | PG server password (must match `pg_password` in tfvars)      |
+| Secret | `IMAGE_API_KEY`            | image API key for this env                                    |
+| Var    | `IMAGE_API_URL`            | image API base URL for this env                               |
 
 The CD identity needs `Reader` on the env resource group + `AKS RBAC Reader` on the cluster (both applied by Terraform via `azure_ad`/`azurerm`). The tf-plan identity gets `Reader` + `AKS Cluster User Role` (to read the kubeconfig for the plan), and tf-apply gets `Contributor` (to run `terraform apply`). No kubeconfig secret: kubectl authenticates through the cluster's Azure AD.
 

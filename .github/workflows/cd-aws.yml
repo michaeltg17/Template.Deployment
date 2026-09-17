@@ -22,10 +22,14 @@
 # API key are in Secrets Manager and synced into the cluster by External Secrets
 # Operator; the image API base URL is in SSM Parameter Store
 # (/<env>/template/image-api-url) and read here. The ONLY per-env GitHub value is
-# the CD role ARN as a repo VARIABLE (from `terraform output -raw cd_role_arn`).
+# the CD role ARN, stored as a VARIABLE under the <env>-<cloud> environment
+# (from `terraform output -raw cd_role_arn`).
 #
-# Required per env (repo settings):
-#   vars:    AWS_ROLE_ARN_<ENV>   (from `terraform output -raw cd_role_arn`)
+# The deploy job runs under the <env>-<cloud> environment (dev-aws / qa-aws /
+# prod-aws); prod is gated by that environment's required reviewers.
+#
+# Required per env (under the <env>-<cloud> environment):
+#   vars:    AWS_ROLE_ARN   (from `terraform output -raw cd_role_arn`)
 
 name: Deploy (AWS)
 
@@ -55,6 +59,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: ${{ github.event.inputs.env }}-aws
     permissions:
       contents: write
       id-token: write
@@ -75,7 +80,7 @@ jobs:
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars[format('AWS_ROLE_ARN_{0}', github.event.inputs.env)] }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve image tags (main HEAD sha7, or explicit override)

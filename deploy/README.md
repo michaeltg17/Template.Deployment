@@ -34,5 +34,5 @@ Committing the rendered output makes the exact set of manifests that were
 applied to a cluster visible in git history - a per-env, per-cloud audit trail -
 and lets ArgoCD show drift against a concrete, reviewable source. Secrets are
 never committed: on AWS they are fetched at runtime by External Secrets
-Operator, and on Azure the (non-prod) values are rendered from repo secrets at
-CD time.
+Operator, and on Azure the (non-prod) values are rendered from the `<env>-azure`
+environment secrets at CD time.
