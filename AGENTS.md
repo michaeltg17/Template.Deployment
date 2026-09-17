@@ -27,7 +27,7 @@
 
 - **All work happens on the `dev` branch.** Commit directly to `dev`; do **not** create feature/topic branches that open a PR straight to `main`.
 - `main` only ever changes via a merged **`dev` → `main`** PR. There is exactly one PR in flight at a time, from `dev` to `main`.
-- So the loop is: commit on `dev` → push `dev` → open (or update) the `dev` → `main` PR → merge.
+- So the loop is: commit on `dev` → push `dev` → open (or update) the `dev` → `main` PR. **Never merge the PR** - the user reviews it and merges it themselves.
 
 ## PR Workflow (dev → main)
 
@@ -38,6 +38,7 @@ When creating or updating the `dev` → `main` PR:
 3. Check if a PR already exists (use `github_list_pull_requests`).
 4. If none exists, create one with an accurate title and description summarizing the changes.
 5. If one exists, update its title and description to reflect the actual current diff.
+6. **Stop there. Never merge the PR (no `gh pr merge`, no merge via the API).** The user reviews the diff and merges it themselves; merging on the user's behalf defeats the review.
 
 ## AWS Guidance
 
