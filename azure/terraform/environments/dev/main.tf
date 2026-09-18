@@ -46,9 +46,15 @@ module "postgresql" {
 module "appgateway" {
   source = "../../modules/appgateway"
 
-  name                = "${local.name}-agw"
+  name                = local.name
   location            = var.location
   resource_group_name = azurerm_resource_group.this.name
   public_subnet_id    = module.vnet.appgw_subnet_id
   tags                = local.tags
 }
+
+# ArgoCD (GitOps) lives in its own terraform state (./argocd) so it can read
+# the cluster after it exists (the module's data source reads the cluster's
+# kube_config, which does not exist during the first apply of this state). It
+# reads the cluster + tf principal ids from this state's outputs via
+# terraform_remote_state.

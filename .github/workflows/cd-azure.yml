@@ -1,23 +1,30 @@
-# Manual continuous deployment (Azure): deploys the app repos' (Template.Api,
-# Template.React) image tags to an AKS environment. The app repos build and push
-# ghcr images themselves (tagged <sha7> + latest); this workflow picks the sha7
-# of the app repos' main HEAD (or an explicit override) and runs
-# common/k8s/deploy.sh <env> azure.
+# Continuous deployment (Azure, GitOps): renders the app stack manifests for an
+# AKS environment and commits them to deploy/<env>/azure/. ArgoCD (installed by
+# terraform) watches that path on main and syncs it into the cluster - this
+# workflow never talks to kubectl.
+#
+# The app repos (Template.Api, Template.React) build and push ghcr images
+# themselves (tagged <sha7> + latest); this workflow picks the sha7 of the app
+# repos' main HEAD (or an explicit override) and renders the manifests with
+# those tags.
 #
 # Trigger: Actions tab -> "Deploy (Azure)" -> choose env (optionally pin tags) -> Run.
 #
 # Auth: GitHub OIDC federated to the per-env CD service principal created by
 # terraform (`terraform output -raw cd_client_id` / `cd_tenant_id`). No stored
-# kubeconfig: kubectl talks to AKS via `az aks get-credentials`. The federated
-# identity is bound to the dev + main branch refs (see modules/aks).
+# kubeconfig, no kubectl: the only cluster write is ArgoCD syncing the commit.
+# The federated identity is bound to the dev + main branch refs (see modules/aks).
 #
-# Required per env (repo settings):
-#   secrets: AZURE_CLIENT_ID_<ENV>      (from `terraform output -raw cd_client_id`)
-#            AZURE_TENANT_ID_<ENV>      (from `terraform output -raw cd_tenant_id`)
-#            AZURE_SUBSCRIPTION_ID_<ENV>
-#            DB_PASSWORD_<ENV>          (must match the PG admin password in tfvars)
-#            IMAGE_API_KEY_<ENV>
-#   vars:    IMAGE_API_URL_<ENV>        (image API base URL for that env)
+# The deploy job runs under the <env>-<cloud> environment (dev-azure); prod is
+# gated by that environment's required reviewers (prod-azure).
+#
+# Required per env (under the <env>-<cloud> environment):
+#   secrets: AZURE_CLIENT_ID            (from `terraform output -raw cd_client_id`)
+#            AZURE_TENANT_ID            (from `terraform output -raw cd_tenant_id`)
+#            AZURE_SUBSCRIPTION_ID
+#            DB_PASSWORD                (must match the PG admin password in tfvars)
+#            IMAGE_API_KEY
+#   vars:    IMAGE_API_URL              (image API base URL for that env)
 
 env:
   # Project name: the suffix of every resource name (env-first: <env>-<project>)
@@ -46,30 +53,28 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: ${{ github.event.inputs.env }}-azure
     permissions:
-      contents: read
+      contents: write
       id-token: write
     env:
       ENV_NAME: ${{ github.event.inputs.env }}
       RESOURCE_GROUP: ${{ github.event.inputs.env }}-${{ env.PROJECT }}-rg
       AKS_NAME: ${{ github.event.inputs.env }}-${{ env.PROJECT }}
       PG_NAME: ${{ github.event.inputs.env }}-${{ env.PROJECT }}-pg
-      IMAGE_API_URL: ${{ vars['IMAGE_API_URL_' + github.event.inputs.env] }}
-      DB_PASSWORD: ${{ secrets['DB_PASSWORD_' + github.event.inputs.env] }}
-      IMAGE_API_KEY: ${{ secrets['IMAGE_API_KEY_' + github.event.inputs.env] }}
+      IMAGE_API_URL: ${{ vars.IMAGE_API_URL }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install kubectl
-        run: curl -fsSL https://get.k8s.io | bash
-
       - name: Configure Azure credentials (GitHub OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets['AZURE_CLIENT_ID_' + github.event.inputs.env] }}
-          tenant-id: ${{ secrets['AZURE_TENANT_ID_' + github.event.inputs.env] }}
-          subscription-id: ${{ secrets['AZURE_SUBSCRIPTION_ID_' + github.event.inputs.env] }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Resolve image tags (main HEAD sha7, or explicit override)
         env:
@@ -99,9 +104,9 @@ jobs:
 
       - name: Render env files
         run: |
-          : "${IMAGE_API_URL:?set the IMAGE_API_URL_$ENV_NAME repository variable}"
-          : "${DB_PASSWORD:?set the DB_PASSWORD_$ENV_NAME repository secret}"
-          : "${IMAGE_API_KEY:?set the IMAGE_API_KEY_$ENV_NAME repository secret}"
+          : "${IMAGE_API_URL:?set the IMAGE_API_URL variable in the $ENV_NAME-azure environment}"
+          : "${DB_PASSWORD:?set the DB_PASSWORD secret in the $ENV_NAME-azure environment}"
+          : "${IMAGE_API_KEY:?set the IMAGE_API_KEY secret in the $ENV_NAME-azure environment}"
           sed \
             -e "s|^IMAGE_API_URL=.*|IMAGE_API_URL=$IMAGE_API_URL|" \
             -e "s|^RDS_ENDPOINT=.*|RDS_ENDPOINT=$RDS_ENDPOINT|" \
@@ -112,11 +117,17 @@ jobs:
             "common/k8s/environments/$ENV_NAME.env.example" > "common/k8s/environments/$ENV_NAME.env"
           printf 'DB_PASSWORD=%s\nIMAGE_API_KEY=%s\n' "$DB_PASSWORD" "$IMAGE_API_KEY" > "common/k8s/environments/$ENV_NAME.secrets.env"
 
-      - name: Configure kubectl (AKS)
-        run: |
-          az aks get-credentials --name "$AKS_NAME" --resource-group "$RESOURCE_GROUP"
-          kubectl version --client
-          kubectl get nodes
+      - name: Render manifests (GitOps - no kubectl)
+        run: bash common/k8s/render.sh "$ENV_NAME" azure "deploy/$ENV_NAME/azure"
 
-      - name: Deploy
-        run: bash common/k8s/deploy.sh "$ENV_NAME" azure
+      - name: Commit rendered manifests to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "deploy/$ENV_NAME/azure"
+          if git diff --cached --quiet; then
+            echo "No manifest changes for $ENV_NAME/azure - nothing to commit."
+            exit 0
+          fi
+          git commit -m "deploy(azure): $ENV_NAME api=$API_TAG react=$REACT_TAG"
+          git push origin HEAD:main

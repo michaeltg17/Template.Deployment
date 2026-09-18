@@ -1,14 +1,18 @@
-# Manual continuous deployment: deploys the app repos' (Template.Api, Template.React)
-# image tags to an EKS environment. The app repos build and push ghcr images
-# themselves (tagged <sha7> + latest); this workflow picks the sha7 of the
-# app repos' main HEAD (or an explicit override) and runs common/k8s/deploy.sh.
+# Continuous deployment (AWS, GitOps): renders the app stack manifests for an
+# EKS environment and commits them to deploy/<env>/aws/. ArgoCD (installed by
+# terraform) watches that path on main and syncs it into the cluster - this
+# workflow never talks to kubectl.
 #
-# Trigger: Actions tab -> "Deploy" -> choose env (optionally pin tags) -> Run.
+# The app repos (Template.Api, Template.React) build and push ghcr images
+# themselves (tagged <sha7> + latest); this workflow picks the sha7 of the app
+# repos' main HEAD (or an explicit override) and renders the manifests with
+# those tags.
 #
-# Auth: the workflow assumes the per-env GitHub OIDC role created by
-# terraform (`terraform output -raw cd_role_arn`). No stored kubeconfig:
-# kubectl talks to EKS via `aws eks update-kubeconfig` (its exec creds
-# call `aws eks get-token` per request).
+# Trigger: Actions tab -> "Deploy (AWS)" -> choose env (optionally pin tags) -> Run.
+#
+# Auth: the per-env GitHub OIDC role created by terraform (the CD role, read-only
+# AWS access - it only resolves the RDS endpoint + image API URL). No stored
+# kubeconfig, no kubectl: the only cluster write is ArgoCD syncing the commit.
 #
 # Resource names are env-first (PROJECT is the suffix, set below): cluster
 # <env>-template, RDS instance <env>-template-db (the endpoint is resolved at
@@ -18,10 +22,14 @@
 # API key are in Secrets Manager and synced into the cluster by External Secrets
 # Operator; the image API base URL is in SSM Parameter Store
 # (/<env>/template/image-api-url) and read here. The ONLY per-env GitHub value is
-# the CD role ARN as a repo VARIABLE (from `terraform output -raw cd_role_arn`).
+# the CD role ARN, stored as a VARIABLE under the <env>-<cloud> environment
+# (from `terraform output -raw cd_role_arn`).
 #
-# Required per env (repo settings):
-#   vars:    AWS_ROLE_ARN_<ENV>   (from `terraform output -raw cd_role_arn`)
+# The deploy job runs under the <env>-<cloud> environment (dev-aws / qa-aws /
+# prod-aws); prod is gated by that environment's required reviewers.
+#
+# Required per env (under the <env>-<cloud> environment):
+#   vars:    AWS_ROLE_ARN   (from `terraform output -raw cd_role_arn`)
 
 name: Deploy (AWS)
 
@@ -51,15 +59,16 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: ${{ github.event.inputs.env }}-aws
     permissions:
-      contents: read
+      contents: write
       id-token: write
     env:
       ENV_NAME: ${{ github.event.inputs.env }}
       CLUSTER_NAME: ${{ github.event.inputs.env }}-${{ env.PROJECT }}
       RDS_IDENTIFIER: ${{ github.event.inputs.env }}-${{ env.PROJECT }}-db
       SSM_IMAGE_API_URL: /${{ github.event.inputs.env }}/${{ env.PROJECT }}/image-api-url
-      # ESO values are deterministic from the env name - passed to deploy.sh so
+      # ESO values are deterministic from the env name - passed to render.sh so
       # it does not need `terraform init` in CD.
       AWS_REGION: us-east-1
       DB_SECRET_NAME: ${{ github.event.inputs.env }}-${{ env.PROJECT }}-db
@@ -68,13 +77,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Install kubectl
-        run: curl -fsSL https://get.k8s.io | bash
-
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars[format('AWS_ROLE_ARN_{0}', github.event.inputs.env)] }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve image tags (main HEAD sha7, or explicit override)
@@ -121,11 +127,17 @@ jobs:
             -e "s|^REACT_IMAGE_TAG=.*|REACT_IMAGE_TAG=$REACT_TAG|" \
             "common/k8s/environments/$ENV_NAME.env.example" > "common/k8s/environments/$ENV_NAME.env"
 
-      - name: Configure kubectl (EKS)
-        run: |
-          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
-          kubectl version --client
-          kubectl get nodes
+      - name: Render manifests (GitOps - no kubectl)
+        run: bash common/k8s/render.sh "$ENV_NAME" aws "deploy/$ENV_NAME/aws"
 
-      - name: Deploy
-        run: bash common/k8s/deploy.sh "$ENV_NAME" aws
+      - name: Commit rendered manifests to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "deploy/$ENV_NAME/aws"
+          if git diff --cached --quiet; then
+            echo "No manifest changes for $ENV_NAME/aws - nothing to commit."
+            exit 0
+          fi
+          git commit -m "deploy(aws): $ENV_NAME api=$API_TAG react=$REACT_TAG"
+          git push origin HEAD:main

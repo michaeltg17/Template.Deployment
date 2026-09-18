@@ -13,6 +13,18 @@ output "cluster_name" {
   value       = module.eks.cluster_name
 }
 
+# Surfaced for the argocd state (./argocd), which reads the cluster via
+# terraform_remote_state to configure its helm/kubernetes providers.
+output "cluster_endpoint" {
+  description = "EKS API endpoint (argocd state)"
+  value       = module.eks.cluster_endpoint
+}
+
+output "cluster_certificate_authority_data" {
+  description = "Base64-encoded cluster CA certificate (argocd state)"
+  value       = module.eks.cluster_certificate_authority_data
+}
+
 output "kubectl_setup" {
   description = "One-liner to point kubectl at the cluster"
   value       = "aws eks update-kubeconfig --name ${module.eks.cluster_name} --alias ${module.eks.cluster_name}"
@@ -31,6 +43,16 @@ output "db_user" {
 output "cd_role_arn" {
   description = "GitHub Actions role ARN for the CD (deploy) workflow (set as the AWS_ROLE_ARN_<ENV> repo variable)"
   value       = module.eks.cd_role_arn
+}
+
+output "plan_role_arn" {
+  description = "GitHub Actions role ARN for the read-only terraform plan CI job (set as the AWS_PLAN_ROLE_ARN_<ENV> repo variable)"
+  value       = module.eks.plan_role_arn
+}
+
+output "apply_role_arn" {
+  description = "GitHub Actions role ARN for the terraform apply CI job (set as the AWS_APPLY_ROLE_ARN_<ENV> repo variable)"
+  value       = module.eks.apply_role_arn
 }
 
 output "alb_controller_role_arn" {

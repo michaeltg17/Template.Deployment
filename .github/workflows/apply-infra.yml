@@ -1,0 +1,115 @@
+# Apply infrastructure (Terraform) - the write counterpart to the terraform-plan
+# job in ci.yml. Applies BOTH the main env state and the argocd state (in that
+# order - the argocd state reads the cluster from the main state's outputs).
+#
+# Triggers:
+#   - push to main: auto-applies dev + qa (both clouds), keeping them in sync
+#     with main after a merged PR.
+#   - workflow_dispatch: applies a single chosen env + cloud (this is how prod
+#     is applied - button-triggered, gated by the <env>-<cloud> GitHub
+#     environment's required reviewers, e.g. prod-aws / prod-azure).
+#
+# Each leg runs under the <env>-<cloud> GitHub environment (dev-aws, qa-aws,
+# prod-aws, dev-azure). Auth (GitHub OIDC, no stored long-lived creds):
+#   - AWS:   the per-env apply IAM role (Contributor-equivalent, scoped). The
+#            role ARN is an environment VARIABLE under <env>-<cloud>, set once
+#            after the first (local) apply:  AWS_APPLY_ROLE_ARN = terraform output -raw apply_role_arn
+#   - Azure: the per-env tf-apply user-assigned MI (Contributor on the RG). The
+#            client id is an environment SECRET under <env>-<cloud>, set once
+#            after the first (local) apply:  AZURE_TF_APPLY_CLIENT_ID = terraform output -raw tf_apply_client_id
+#
+# First-apply bootstrap: the apply identity itself is created by the first
+# apply, so the very first apply of a brand-new env must run locally (aws sso /
+# az login with Contributor). CI applies work from the second apply onward.
+#
+# Required per env (under the <env>-<cloud> environment), after the first local apply:
+#   AWS:   vars.AWS_APPLY_ROLE_ARN
+#   Azure: secrets.AZURE_TF_APPLY_CLIENT_ID
+#          secrets.AZURE_TENANT_ID
+#          secrets.AZURE_SUBSCRIPTION_ID
+
+name: Apply infra
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        type: choice
+        options: [dev, qa, prod]
+        default: dev
+      cloud:
+        description: "Cloud"
+        type: choice
+        options: [aws, azure]
+        default: aws
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Each leg runs under its <env>-<cloud> environment. prod legs are gated by
+    # that environment's required reviewers (prod-aws / prod-azure); dev/qa
+    # need no gate.
+    environment: ${{ matrix.env }}-${{ matrix.cloud }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # push to main -> auto-apply dev + qa (both clouds).
+        # workflow_dispatch -> the single chosen env + cloud.
+        include:
+          - { env: dev,   cloud: aws,   trigger: push }
+          - { env: qa,    cloud: aws,   trigger: push }
+          - { env: dev,   cloud: azure, trigger: push }
+          - { env: "${{ inputs.env }}", cloud: aws,   trigger: dispatch }
+          - { env: "${{ inputs.env }}", cloud: azure, trigger: dispatch }
+    # Only run the rows that match the current event:
+    #   push        -> the fixed dev/qa rows (never prod on auto-apply)
+    #   dispatch    -> the single row whose cloud matches the chosen cloud
+    if: >
+      (github.event_name == 'push' && matrix.trigger == 'push') ||
+      (github.event_name == 'workflow_dispatch' && matrix.trigger == 'dispatch' && matrix.cloud == inputs.cloud)
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+
+      - name: Configure AWS credentials (GitHub OIDC, apply role)
+        if: matrix.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Configure Azure credentials (GitHub OIDC, tf-apply MI)
+        if: matrix.cloud == 'azure'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_TF_APPLY_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Apply main state
+        working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve -no-color
+
+      - name: Apply argocd state (reads cluster from main state)
+        working-directory: ${{ matrix.cloud }}/terraform/environments/${{ matrix.env }}/argocd
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve -no-color

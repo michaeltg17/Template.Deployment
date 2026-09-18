@@ -7,6 +7,13 @@ metadata:
   namespace: app
   labels:
     app: migrations
+  annotations:
+    # ArgoCD GitOps hook: run the migrations Job before each sync (PreSync) and
+    # delete it on success, so a new Job is created on every deploy (a Job's
+    # spec.template is immutable - re-applying the same name would fail). dbup
+    # is idempotent, so re-running on each sync is safe.
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
 spec:
   backoffLimit: 5
   ttlSecondsAfterFinished: 3600

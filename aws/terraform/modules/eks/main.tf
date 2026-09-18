@@ -366,6 +366,435 @@ resource "aws_iam_role_policy" "cd" {
   policy = data.aws_iam_policy_document.cd.json
 }
 
+# ----- GitHub Actions OIDC (Terraform plan / apply) -----
+# Two more OIDC roles alongside the CD role:
+#   plan:  read-only, assumed by `terraform plan` on every PR (any ref).
+#   apply: write, assumed by `terraform apply` from main (push to main, or
+#          workflow_dispatch for prod). Pinned to the main ref plus the
+#          no-ref sub that workflow_dispatch presents.
+# The plan job refreshes state and reads live resources, so it needs real
+# (read) credentials - a role, not a no-cred plan.
+
+data "aws_iam_policy_document" "plan_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      # Read-only, so any ref on the repo may assume it (PRs from any branch).
+      values = concat(
+        ["repo:${var.github_repo}:*"],
+        (var.github_owner_id != "" && var.github_repo_id != "") ? [
+          "repo:${split("/", var.github_repo)[0]}@${var.github_owner_id}/${split("/", var.github_repo)[1]}@${var.github_repo_id}:*",
+        ] : [],
+      )
+    }
+  }
+}
+
+resource "aws_iam_role" "plan" {
+  name_prefix        = "${var.name}-plan-"
+  assume_role_policy = data.aws_iam_policy_document.plan_assume.json
+
+  tags = local.tags
+}
+
+# Read-only across every service this config touches, plus S3 state read.
+# Scoped where the resource name/ARN is known (RDS, EKS, SSM); the rest are
+# Describe/List/Read actions only.
+data "aws_iam_policy_document" "plan" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:ListBucket",
+    ]
+    # State bucket (from the environment's backend config) - the plan job
+    # reads the state to refresh it. The bucket name is not known to this
+    # module, so allow List on any bucket but Get only on the state prefix
+    # pattern used by all environments (<account>-template-terraform-state).
+    resources = [
+      "arn:aws:s3:::*",
+      "arn:aws:s3:::*-template-terraform-state/*",
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ec2:DescribeVpcs",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeInstances",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeRouteTables",
+      "ec2:DescribeInternetGateways",
+      "ec2:DescribeNatGateways",
+      "ec2:DescribeEipAddresses",
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeTags",
+      "ec2:DescribeVolumeStatus",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "eks:ListClusters",
+      "eks:ListNodes",
+      "eks:DescribeCluster",
+      "eks:DescribeNodegroup",
+      "eks:ListNodegroups",
+      "eks:DescribeAddon",
+      "eks:ListAddons",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "rds:DescribeDBInstances",
+      "rds:DescribeDBClusters",
+      "rds:DescribeDBSubnetGroups",
+      "rds:DescribeDBClusterParameters",
+      "rds:DescribeDBClusterParameterGroups",
+      "rds:DescribeDBParameterGroups",
+      "rds:DescribeDBParameters",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "iam:ListRoles",
+      "iam:ListRolePolicies",
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:GetOpenIDConnectProvider",
+      "iam:ListOpenIDConnectProviders",
+      "iam:ListInstanceProfiles",
+      "iam:GetInstanceProfile",
+      "iam:ListPolicies",
+      "iam:ListPolicyVersions",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "sts:GetCallerIdentity",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:DescribeLoadBalancers",
+      "elasticloadbalancing:DescribeTargetGroups",
+      "elasticloadbalancing:DescribeListeners",
+      "elasticloadbalancing:DescribeRules",
+      "elasticloadbalancing:DescribeTags",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "secretsmanager:GetRandomPassword",
+      "secretsmanager:ListSecrets",
+      "secretsmanager:DescribeSecret",
+    ]
+    # Never GetSecretValue: the plan job must not be able to read secret
+    # values (db_master_password, image_api_key are tfvars, not state).
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ssm:GetParameter",
+      "ssm:GetParameters",
+      "ssm:DescribeParameters",
+    ]
+    resources = ["*"]
+  }
+
+  # `aws eks get-token` (the helm/kubernetes provider exec credential plugin,
+  # used to read cluster state of the argocd module during plan).
+  statement {
+    effect    = "Allow"
+    actions   = ["sts:GetWebIdentityToken"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "plan" {
+  role   = aws_iam_role.plan.id
+  policy = data.aws_iam_policy_document.plan.json
+}
+
+data "aws_iam_policy_document" "apply_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      # Write access: only main (push trigger) and the no-ref sub that
+      # workflow_dispatch presents (prod apply is button-triggered).
+      values = concat(
+        [
+          "repo:${var.github_repo}:ref:refs/heads/main",
+          "repo:${var.github_repo}",
+        ],
+        (var.github_owner_id != "" && var.github_repo_id != "") ? [
+          "repo:${split("/", var.github_repo)[0]}@${var.github_owner_id}/${split("/", var.github_repo)[1]}@${var.github_repo_id}:ref:refs/heads/main",
+          "repo:${split("/", var.github_repo)[0]}@${var.github_owner_id}/${split("/", var.github_repo)[1]}@${var.github_repo_id}",
+        ] : [],
+      )
+    }
+  }
+}
+
+resource "aws_iam_role" "apply" {
+  name_prefix        = "${var.name}-apply-"
+  assume_role_policy = data.aws_iam_policy_document.apply_assume.json
+
+  tags = local.tags
+}
+
+# Full create/read/update/delete on the services this config manages. This is
+# intentionally broad (it must create/modify/destroy VPC, EKS, RDS, IAM
+# roles, SSM, Secrets Manager) but is scoped to the env by the assume-role
+# policy (main ref only) and lives in a per-env role.
+data "aws_iam_policy_document" "apply" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "ec2:CreateVpc",
+      "ec2:DeleteVpc",
+      "ec2:CreateSubnet",
+      "ec2:DeleteSubnet",
+      "ec2:ModifyVpcAttribute",
+      "ec2:CreateInternetGateway",
+      "ec2:DeleteInternetGateway",
+      "ec2:AttachInternetGateway",
+      "ec2:DetachInternetGateway",
+      "ec2:CreateRouteTable",
+      "ec2:DeleteRouteTable",
+      "ec2:CreateRoute",
+      "ec2:DeleteRoute",
+      "ec2:ReplaceRoute",
+      "ec2:AssociateRouteTable",
+      "ec2:DisassociateRouteTable",
+      "ec2:CreateNatGateway",
+      "ec2:DeleteNatGateway",
+      "ec2:AllocateAddress",
+      "ec2:ReleaseAddress",
+      "ec2:ModifyAddressAttribute",
+      "ec2:CreateSecurityGroup",
+      "ec2:DeleteSecurityGroup",
+      "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupIngress",
+      "ec2:AuthorizeSecurityGroupEgress",
+      "ec2:RevokeSecurityGroupEgress",
+      "ec2:CreateTags",
+      "ec2:DeleteTags",
+      "ec2:DescribeVpcs",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeInstances",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeRouteTables",
+      "ec2:DescribeInternetGateways",
+      "ec2:DescribeNatGateways",
+      "ec2:DescribeEipAddresses",
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeTags",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "eks:CreateCluster",
+      "eks:DeleteCluster",
+      "eks:UpdateClusterConfig",
+      "eks:CreateNodegroup",
+      "eks:DeleteNodegroup",
+      "eks:UpdateNodegroupConfig",
+      "eks:CreateAddon",
+      "eks:DeleteAddon",
+      "eks:UpdateAddonConfiguration",
+      "eks:CreateAccessEntry",
+      "eks:DeleteAccessEntry",
+      "eks:UpdateAccessEntry",
+      "eks:ListClusters",
+      "eks:ListNodes",
+      "eks:DescribeCluster",
+      "eks:DescribeNodegroup",
+      "eks:ListNodegroups",
+      "eks:DescribeAddon",
+      "eks:ListAddons",
+      "eks:AccessKubernetesCluster",
+    ]
+    resources = ["*"]
+  }
+
+  # `aws eks get-token` (used by the helm provider to install ArgoCD) mints a
+  # Kubernetes token via STS web-identity exchange.
+  statement {
+    effect    = "Allow"
+    actions   = ["sts:GetWebIdentityToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "rds:CreateDBInstance",
+      "rds:DeleteDBInstance",
+      "rds:ModifyDBInstance",
+      "rds:CreateDBSubnetGroup",
+      "rds:DeleteDBSubnetGroup",
+      "rds:ModifyDBSubnetGroup",
+      "rds:CreateDBClusterParameterGroup",
+      "rds:DeleteDBClusterParameterGroup",
+      "rds:ModifyDBClusterParameterGroup",
+      "rds:CreateOptionGroup",
+      "rds:DeleteOptionGroup",
+      "rds:DescribeDBInstances",
+      "rds:DescribeDBClusters",
+      "rds:DescribeDBSubnetGroups",
+      "rds:DescribeDBClusterParameters",
+      "rds:DescribeDBClusterParameterGroups",
+      "rds:DescribeDBParameterGroups",
+      "rds:DescribeDBParameters",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "iam:CreateRole",
+      "iam:DeleteRole",
+      "iam:UpdateRole",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:CreateRolePolicyVersion",
+      "iam:DeleteRolePolicyVersion",
+      "iam:GetRolePolicyVersion",
+      "iam:CreateOpenIDConnectProvider",
+      "iam:DeleteOpenIDConnectProvider",
+      "iam:UpdateOpenIDConnectProvider",
+      "iam:CreateInstanceProfile",
+      "iam:DeleteInstanceProfile",
+      "iam:AddRoleToInstanceProfile",
+      "iam:RemoveRoleFromInstanceProfile",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:ListRoles",
+      "iam:ListRolePolicies",
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:GetOpenIDConnectProvider",
+      "iam:ListOpenIDConnectProviders",
+      "iam:ListInstanceProfiles",
+      "iam:GetInstanceProfile",
+      "iam:ListPolicies",
+      "iam:ListPolicyVersions",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "sts:GetCallerIdentity",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "secretsmanager:CreateSecret",
+      "secretsmanager:DeleteSecret",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:UpdateSecret",
+      "secretsmanager:TagResource",
+      "secretsmanager:ListSecrets",
+      "secretsmanager:DescribeSecret",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:DeleteParameter",
+      "ssm:GetParameter",
+      "ssm:GetParameters",
+      "ssm:DescribeParameters",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:ListBucket",
+    ]
+    # State bucket only (all environments share <account>-template-terraform-state).
+    resources = [
+      "arn:aws:s3:::*-template-terraform-state",
+      "arn:aws:s3:::*-template-terraform-state/*",
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "cloudformation:DescribeStacks",
+      "cloudformation:DescribeStackResources",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "apply" {
+  role   = aws_iam_role.apply.id
+  policy = data.aws_iam_policy_document.apply.json
+}
+
 # Access entry for the CD role (the GitHub Actions OIDC identity). In API auth
 # mode this is how the CD role gets Kubernetes API access (no aws-auth
 # ConfigMap). Only custom principals need a manual entry - EKS auto-creates
@@ -381,6 +810,27 @@ resource "aws_eks_access_entry" "cd" {
   user_name         = "cd-${var.name}"
   type              = "STANDARD"
   kubernetes_groups = ["admins"]
+}
+
+# Access entries for the terraform plan/apply roles. In API auth mode these
+# are how `aws eks get-token` (the helm/kubernetes provider exec credential
+# plugin) gets a valid token for them. Their k8s RBAC is granted by the
+# argocd module (read-only for plan, cluster-admin for apply - it installs
+# ArgoCD there), not by the "admins" group.
+resource "aws_eks_access_entry" "plan" {
+  cluster_name      = aws_eks_cluster.this.name
+  principal_arn     = aws_iam_role.plan.arn
+  user_name         = "tf-plan-${var.name}"
+  type              = "STANDARD"
+  kubernetes_groups = ["tf-plan"]
+}
+
+resource "aws_eks_access_entry" "apply" {
+  cluster_name      = aws_eks_cluster.this.name
+  principal_arn     = aws_iam_role.apply.arn
+  user_name         = "tf-apply-${var.name}"
+  type              = "STANDARD"
+  kubernetes_groups = ["tf-apply"]
 }
 
 # ----- load balancer controller (IRSA) -----

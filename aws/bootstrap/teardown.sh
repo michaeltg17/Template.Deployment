@@ -36,6 +36,12 @@ command -v terraform >/dev/null 2>&1 || { echo "ERROR: terraform not found in PA
 
 tfout() { terraform -chdir="$TF_DIR" output -raw "$1"; }
 
+# Connect to the remote state backend so the outputs below resolve even on a
+# fresh checkout (idempotent: a fast no-op when already initialized). Mirrors
+# azure/bootstrap/teardown.sh, which the AWS script previously omitted.
+echo "==> terraform init (main state - connect to the remote state backend)"
+terraform -chdir="$TF_DIR" init
+
 CLUSTER_NAME="${CLUSTER_NAME:-$(tfout cluster_name)}"
 AWS_REGION="${AWS_REGION:-$(tfout region)}"
 VPC_ID="${VPC_ID:-$(tfout vpc_id)}"
@@ -132,7 +138,18 @@ if [ -n "$VPC_ID" ]; then
   done
 fi
 
-echo "==> terraform destroy"
+# ArgoCD lives in its own state (<env>/argocd) and connects to the cluster via
+# helm/kubernetes providers - it must be destroyed BEFORE the main state, while
+# the cluster is still up (so the helm uninstall of ArgoCD can reach the API).
+ARGOCD_TF_DIR="$TF_DIR/argocd"
+if [ -d "$ARGOCD_TF_DIR" ]; then
+  echo "==> terraform init (argocd state - connect to the remote state backend)"
+  terraform -chdir="$ARGOCD_TF_DIR" init
+  echo "==> terraform destroy (argocd state - uninstalls ArgoCD)"
+  terraform -chdir="$ARGOCD_TF_DIR" destroy -auto-approve
+fi
+
+echo "==> terraform destroy (main state)"
 terraform -chdir="$TF_DIR" destroy -auto-approve
 
 echo "==> verifying nothing is left"

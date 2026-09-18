@@ -153,9 +153,14 @@ common/
       dev.env.example         copy to dev.env: IMAGE_API_URL, RDS_ENDPOINT, tags
       dev.secrets.env.example copy to dev.secrets.env: DB_PASSWORD, IMAGE_API_KEY (azure only)
     deploy.sh               <env> <cloud> -> renders + applies common/* + <cloud>/k8s/*
+                            (local / bootstrap path; the GitOps path is render.sh + ArgoCD)
+    render.sh               <env> <cloud> <out> -> renders the same manifests into <out>
+                            (no kubectl); committed by the CD workflows to deploy/<env>/<cloud>/
   ci.sh                   the CI checks (terraform fmt/validate, shellcheck, kubeconform)
   ci-docker.sh            builds the CI tools image, runs ci.sh on the working tree
-  Dockerfile.ci           tools image (terraform, shellcheck, python3, kubeconform)
+  Dockerfile.ci           CI image (terraform, shellcheck, python3, kubeconform)
+  tools-docker.sh         runs this repo's scripts in the pinned DEV tooling container
+  Dockerfile.tools        dev tooling image (terraform, kubectl, helm, aws, az, python3)
 aws/
   terraform/
     bootstrap/           the remote state itself: S3 bucket (state + lockfile of all
@@ -171,10 +176,15 @@ aws/
     environments/
       dev/               module wiring + per-env values (tfvars, gitignored),
                          state in S3 at dev/terraform.tfstate
+        argocd/          SEPARATE state (dev/argocd/terraform.tfstate): installs ArgoCD
+                         + the Application; reads the cluster from the main state above
+                         via terraform_remote_state (it needs a live API endpoint, which
+                         does not exist during the main state's first apply)
       qa/                same as dev (cheap profile), state at qa/terraform.tfstate
+                         (qa/argocd/ the same)
       prod/              hardened (bigger nodes/db, deletion protection, final
                          snapshot, pinned CD OIDC sub, dedicated app user), state
-                         at prod/terraform.tfstate
+                         at prod/terraform.tfstate (prod/argocd/ the same)
   bootstrap/
     setup-eks.sh         kubeconfig + wait nodes + helm install ALB controller + ESO
     provision-db-user.sh create the prod app login in RDS (psql job on the cluster)
@@ -196,6 +206,9 @@ azure/
     environments/
       dev/               module wiring + per-env values (tfvars, gitignored),
                          state in the storage account at dev/terraform.tfstate
+        argocd/          SEPARATE state (dev/argocd/terraform.tfstate): installs ArgoCD
+                         + the Application; reads the cluster from the main state above
+                         via terraform_remote_state (see the aws note for why)
   bootstrap/
     setup-aks.sh         az aks get-credentials + wait nodes + helm install AGIC
                          (+ create the AGIC service principal)
@@ -203,9 +216,15 @@ azure/
   k8s/
     ingress.yaml         AGIC ingress: /api -> api, / -> react
 .github/workflows/
-  ci.yml                fmt + validate + shellcheck + kubeconform (on push); tag + release on main
-  cd-aws.yml            "Deploy (AWS)" workflow (OIDC -> render env -> deploy.sh <env> aws)
-  cd-azure.yml          "Deploy (Azure)" workflow (federated MI -> render env -> deploy.sh <env> azure)
+  ci.yml                fmt + validate + shellcheck + kubeconform; terraform-plan on PRs;
+                        tag + release on main
+  apply-infra.yml       "Apply infra": terraform apply from main (auto dev/qa, button prod);
+                        applies the main state then the argocd state (OIDC)
+  cd-aws.yml            "Deploy (AWS)" (OIDC -> render env -> render.sh -> commit deploy/<env>/aws)
+  cd-azure.yml          "Deploy (Azure)" (federated MI -> render env -> render.sh -> commit deploy/<env>/azure)
+deploy/
+  <env>/aws|azure/      rendered manifests, COMMITTED by the CD workflows, synced by ArgoCD
+                        (see deploy/README.md)
 ```
 
 ## Run CI locally
@@ -216,7 +235,19 @@ The same checks that run in GitHub Actions also run in a docker container, so no
 bash common/ci-docker.sh
 ```
 
-Builds the `template-deployment-ci` tools image once (terraform, shellcheck, python3, kubeconform), then runs `common/ci.sh` against the current working tree (mounted, so uncommitted changes count). It formats/validates **both** clouds' Terraform, shellchecks every shell script, parses all k8s + workflow YAML, and kubeconforms every manifest.
+Builds the `template-deployment-ci` image once (terraform, shellcheck, python3, kubeconform), then runs `common/ci.sh` against the current working tree (mounted, so uncommitted changes count). It `terraform fmt`-checks and `validate`s the main env states (and `init`s the argocd states, which read another state via `terraform_remote_state` and so can't be fully `validate`d without credentials), shellchecks every shell script, parses all k8s + workflow YAML, and kubeconforms every manifest.
+
+## Tooling container (running the repo's scripts locally)
+
+`common/tools-docker.sh` runs **any** of this repo's scripts (bootstrap, deploy, teardown, CI) inside a pinned dev tooling container (`Dockerfile.tools`: terraform, kubectl, helm, aws, az, python3). This is the recommended local path - it gives you the same Linux userland on Windows / macOS / Linux with no WSL and no per-tool installs:
+
+```sh
+bash common/tools-docker.sh                      # interactive shell in the container
+bash common/tools-docker.sh -c "bash common/ci.sh"
+bash common/tools-docker.sh -c "bash aws/bootstrap/setup-eks.sh dev"
+```
+
+Your `~/.aws` / `~/.kube` / `~/.config` are bind-mounted in (read-write), so credentials and kubeconfigs stay on the host and are never baked into the image. On **Windows, run these from Git Bash** (PowerShell mangles the bash scripts). If you'd rather install the tools natively, the pinned versions are terraform 1.15.8, kubectl v1.36.3, helm v3.22.0, awscli 2.34.0, az (latest stable).
 
 ## Shared k8s + deploy.sh
 
@@ -229,14 +260,33 @@ Builds the `template-deployment-ci` tools image once (terraform, shellcheck, pyt
 
 **Secrets differ by cloud.** On **Azure** the DB password + image API key are baked into the `secrets.yaml` Secrets (rendered from `<env>.secrets.env`). On **AWS** they live in **Secrets Manager** and are synced into the cluster at runtime by **External Secrets Operator** (`aws/k8s/secretstore.yaml` + `external-secret.yaml`); the DB login's username + password are pulled from the `<env>-template-db` secret and the connection string is assembled by an ESO v2 template, so the password never enters the manifests or the CD workflow. The two clouds also differ in the ingress (ALB annotations vs. the AGIC `IngressClass`), which is why the ingress lives in `<cloud>/k8s/` rather than `common/k8s/`.
 
+### The GitOps path (render.sh + ArgoCD)
+
+`deploy.sh` (above) is the **local / bootstrap** path: it renders and `kubectl apply`s in one step. The steady-state path is **GitOps**, split into two halves that share the same rendering logic:
+
+- `render.sh <env> <cloud> <out>` renders the common + `<cloud>/k8s/` manifests into `<out>` (the same placeholder substitution + `skip-if` filtering as `deploy.sh`, minus the `kubectl apply`). It needs no `terraform init` - the ESO secret names and other values are deterministic from the env name or passed in.
+- The CD workflows (`cd-aws.yml` / `cd-azure.yml`) resolve the live values (RDS/PG endpoint, image API URL, image tags) with the read-only CD identity, run `render.sh` into `deploy/<env>/<cloud>/`, and **commit** that to `main`.
+- **ArgoCD** (installed by the per-env `argocd` Terraform state) watches `deploy/<env>/<cloud>/` on `main` and syncs the change into the cluster. The migrations Job carries `argocd.argoproj.io/hook: PreSync` + `hook-delete-policy: HookSucceeded`, so it runs before the rest of the sync and is deleted on success.
+
+Committing the rendered output (rather than rendering in-cluster) gives a per-env, per-cloud audit trail in git history and lets ArgoCD show drift against a concrete, reviewable source. See `deploy/README.md`.
+
+### ArgoCD in its own Terraform state (and why)
+
+Each env's ArgoCD install lives in a **separate Terraform state** (`<env>/argocd/`, e.g. `dev/argocd/terraform.tfstate`) rather than in the main env state. The reason is a chicken-and-egg: the `helm` and `kubernetes` providers that install ArgoCD need a **live cluster API endpoint**, which does not exist during the *first* apply of the main state (the cluster is being created in that same apply). By putting ArgoCD in its own state that reads the cluster from the main state via `data "terraform_remote_state"`, the two applies are cleanly ordered:
+
+1. `terraform apply` in `<env>/` - creates the cluster (and everything else), exports `cluster_endpoint` / `cluster_certificate_authority_data` (AWS) or the tf-plan/apply MI `principal_id`s (Azure) as outputs.
+2. `terraform apply` in `<env>/argocd/` - reads those outputs, installs ArgoCD + the `Application` that points at `deploy/<env>/<cloud>/`.
+
+`apply-infra.yml` runs the two in that order. (Note: `terraform validate` cannot check the argocd state's attribute access into `terraform_remote_state` without reading the state, so the CI gate `init`s those states instead of `validate`ing them; the credentialed `terraform-plan` job does the full check.)
+
 ---
 
 ## AWS
 
 ### Prerequisites
 
-- AWS account + `aws` CLI credentials (or `terraform.tfvars` with `aws_profile`), plus `kubectl`
-- Terraform >= 1.5 (CI uses a pinned docker image, no local install needed)
+- **Tooling** - either the container (recommended, no installs): `bash common/tools-docker.sh`, or natively: terraform 1.15.8, kubectl v1.36.3, helm v3.22.0, awscli 2.34.0. On Windows run the scripts from **Git Bash**.
+- AWS account + `aws` CLI credentials (or `terraform.tfvars` with `aws_profile`)
 - the three images pushed to ghcr.io: `template-api`, `template-react`, `template-db-migrations` (public, no registry secret needed)
 - the React app reads `API_URL` from an env var at runtime (no per-env builds)
 
@@ -264,6 +314,25 @@ Builds the `template-deployment-ci` tools image once (terraform, shellcheck, pyt
     ```
 
     The tfvars hold the secrets that Terraform pushes into **Secrets Manager** (the app/master DB login + the image API key) and **SSM Parameter Store** (the image API URL). There is no manual "copy the password into a GitHub secret" step: the values go straight into AWS, and the pods + CD read them from there. (On `prod`, the tfvars also set the dedicated `db_app_username` / `db_app_password`.)
+
+    This apply also creates the **plan / apply / CD IAM roles** (GitHub OIDC) and exports their ARNs. Capture them now - they are the per-env GitHub values the CI/CD workflows need, stored under the `dev-aws` environment (see the table below):
+
+    ```sh
+    terraform output -raw plan_role_arn    # -> dev-aws var  AWS_PLAN_ROLE_ARN
+    terraform output -raw apply_role_arn   # -> dev-aws var  AWS_APPLY_ROLE_ARN
+    terraform output -raw cd_role_arn      # -> dev-aws var  AWS_ROLE_ARN
+    ```
+
+2b. **Install ArgoCD** (separate state - reads the cluster from the main state above):
+
+    ```sh
+    cd aws/terraform/environments/dev/argocd
+    cp terraform.tfvars.example terraform.tfvars   # set argocd_repo_token (a GitHub PAT, contents:read on this repo)
+    terraform init
+    terraform apply
+    ```
+
+    This installs ArgoCD and the `Application` that watches `deploy/dev/aws/` on `main`. It is a separate state because the helm/kubernetes providers need the cluster's live API endpoint, which only exists after the main state is applied (see [ArgoCD in its own Terraform state](#argocd-in-its-own-terraform-state-and-why)). From the second apply onward, `apply-infra.yml` runs this automatically from `main`.
 
 3. **Bootstrap the cluster** (kubeconfig + ALB load balancer controller + ESO):
 
@@ -311,15 +380,17 @@ The app repos (`Template.Api`, `Template.React`) build and push their ghcr image
 
 1. Push to the app repo's `main` (its CI pushes the new `sha7` + `latest` images).
 2. GitHub -> **Actions** -> **Deploy (AWS)** (`.github/workflows/cd-aws.yml`) -> choose `env` -> **Run workflow**.
-3. The workflow assumes the env's OIDC role, resolves the `sha7` of the app repos' `main` HEAD (or a specific `sha7` from the optional `api_tag` / `react_tag` fields, to pin or roll back), resolves the RDS endpoint via the aws CLI and the image API URL from SSM Parameter Store, renders the env file, and runs `common/k8s/deploy.sh <env> aws` — which re-runs the migrations job and rolls the deployments. The DB password + image API key are never in GitHub: ESO reads them from Secrets Manager at runtime.
+3. The workflow assumes the env's read-only CD OIDC role, resolves the `sha7` of the app repos' `main` HEAD (or a specific `sha7` from the optional `api_tag` / `react_tag` fields, to pin or roll back), resolves the RDS endpoint via the aws CLI and the image API URL from SSM Parameter Store, renders the manifests with `common/k8s/render.sh` into `deploy/<env>/aws/`, and **commits** that to `main`. **ArgoCD** then detects the commit and syncs it into the cluster - the migrations Job runs first (`PreSync` hook) and the deployments roll. The DB password + image API key are never in GitHub: ESO reads them from Secrets Manager at runtime.
 
-Required per environment (repo settings -> Secrets & variables -> Actions):
+Required per environment, stored under the `<env>-aws` GitHub environment (Settings -> Environments -> `<env>-aws` -> Variables), all from `terraform output` after the first apply:
 
-| Type | Name               | Value                                    |
-| ---- | ------------------ | ---------------------------------------- |
-| Var  | `AWS_ROLE_ARN_DEV` | `terraform output -raw cd_role_arn`      |
+| Type | Name                | Value                                    |
+| ---- | ------------------- | ---------------------------------------- |
+| Var  | `AWS_ROLE_ARN`      | `terraform output -raw cd_role_arn`      |
+| Var  | `AWS_PLAN_ROLE_ARN` | `terraform output -raw plan_role_arn`    |
+| Var  | `AWS_APPLY_ROLE_ARN`| `terraform output -raw apply_role_arn`   |
 
-That is the **only** per-env GitHub value. The DB login (app or master) + image API key are in Secrets Manager (synced by ESO) and the image API URL is in SSM Parameter Store (`/<env>/template/image-api-url`), all created by `terraform apply`. `dev`/`qa`/`prod` all follow this pattern: each has an `aws/terraform/environments/<env>` and one `AWS_ROLE_ARN_<ENV>` variable.
+The CD role is what `Deploy (AWS)` uses (read-only: it resolves the RDS endpoint + image API URL). The plan/apply roles are what the `terraform-plan` (PR) and `apply-infra` (main) jobs use. The DB login (app or master) + image API key are in Secrets Manager (synced by ESO) and the image API URL is in SSM Parameter Store (`/<env>/template/image-api-url`), all created by `terraform apply`. `dev`/`qa`/`prod` all follow this pattern: each has an `aws/terraform/environments/<env>` (and `<env>/argocd/`) and the `<env>-aws` environment holding the three role-ARN variables above.
 
 No kubeconfig secret: kubectl authenticates through the OIDC role (`aws eks update-kubeconfig` mints short-lived tokens per request). The cluster runs in EKS **API auth mode** (access entries, not the legacy `aws-auth` ConfigMap): the `eks` module sets `access_config.authentication_mode = "API"` and creates an access entry for the CD role in a custom `admins` group (EKS rejects any access-entry group starting with `system:`, so `system:masters` is not usable). EKS auto-creates the node-role entry for the managed node group. Cluster-admin for the CD role is granted by the `cd-admins` ClusterRoleBinding (`aws/k8s/cd-admin.yaml`, applied by `deploy.sh`) that binds the built-in `cluster-admin` ClusterRole to the `admins` group. Note the auth-mode change is one-way (`CONFIG_MAP` -> `API_AND_CONFIG_MAP` -> `API`) and in-place (no cluster replacement); `bootstrap_cluster_creator_admin_permissions` is pinned to `true` to avoid a provider recreation bug (hashicorp/terraform-provider-aws#38967).
 
@@ -345,7 +416,7 @@ cd aws/terraform/environments/dev && terraform destroy
 
 The remote state itself (the S3 bucket from `aws/terraform/bootstrap`) is **not** touched by `teardown.sh`: it outlives the environment so state history (versioned) is kept, and so a re-deploy goes straight to `terraform apply`.
 
-Re-deploying later is: `terraform apply` -> `aws/bootstrap/setup-eks.sh` -> `common/k8s/deploy.sh dev aws`.
+Re-deploying later is: `terraform apply` (main state) -> `terraform apply` in `<env>/argocd/` (ArgoCD) -> `aws/bootstrap/setup-eks.sh` -> then either `common/k8s/deploy.sh dev aws` (bootstrap) or the **Deploy (AWS)** workflow (GitOps, renders + commits to `deploy/dev/aws/` and ArgoCD syncs).
 
 ### Prod hardening
 
@@ -357,7 +428,7 @@ Re-deploying later is: `terraform apply` -> `aws/bootstrap/setup-eks.sh` -> `com
 - Single NAT gateway in one AZ (cheapest): an AZ outage affects new image pulls, not running pods. Add one NAT per AZ for full HA.
 - dev/qa connect to RDS as the master user; **prod** uses a dedicated app login (`db_app_username`/`db_app_password`, created by `provision-db-user.sh`). IAM database auth is not used (password auth via the Secrets Manager secret).
 - The RDS connection uses `SSL Mode=Require` with `Trust Server Certificate=true`: traffic is encrypted but the RDS CA is not pinned, so the server's identity is not verified (a MITM could present a fake cert). For prod, pin the RDS CA certificate and use `SSL Mode=Verify-Full`.
-- CI/CD never runs `terraform` (only `common/k8s/deploy.sh`). If that changes (e.g. a pipeline applies prod), the pipeline role needs S3 access to the env's state key + lockfile in `michaeltg17-template-terraform-state` (see the [S3 backend docs](https://developer.hashicorp.com/terraform/language/backend/s3#permissions-required) for the exact statements).
+- CI/CD **does** run `terraform` now: `terraform-plan` (read-only, on every PR) and `apply-infra` (apply from `main`, auto for dev/qa, button for prod) both authenticate via GitHub OIDC to the per-env plan/apply IAM roles. Those roles carry the S3 state read (plan) / read+write+lock (apply) permissions on the env's state key in `michaeltg17-template-terraform-state` (see the [S3 backend docs](https://developer.hashicorp.com/terraform/language/backend/s3#permissions-required) for the exact statements). The very first apply of a brand-new env still runs locally (the apply role is created by that apply).
 - `worker_min_size` defaults to 1: set it to 3 (one per AZ) when the app needs real HA.
 - The EKS API endpoint is **public** (`endpoint_public_access = true`) and the cluster SG allows 443 from `0.0.0.0/0`. This is safe for this phase because auth is enforced by IAM, not the network: the CD role authenticates via the GitHub Actions OIDC access entry (pinned to `repo:<owner>/<name>`), and local kubectl via AWS credentials — a random internet client cannot authenticate even though 443 is reachable. It is **not** scoped to GitHub's egress ranges, and that is a hard limit, not an oversight: GitHub's Actions egress list is ~3,700 collapsed IPv4 CIDRs (5,436 raw, plus ~1,360 IPv6), far beyond the 60 inbound security-group rule limit and the 1,000-entry managed-prefix-list cap, and there is no AWS-managed prefix list for GitHub egress — so enumerating it in the SG is infeasible. The prod path to remove the public surface is `endpoint_public_access = false` + running CD from a **GitHub self-hosted runner** placed in the VPC (reaching the private endpoint), with local kubectl over VPN.
 
@@ -367,9 +438,9 @@ Re-deploying later is: `terraform apply` -> `aws/bootstrap/setup-eks.sh` -> `com
 
 ### Prerequisites
 
-- Azure account + `az` CLI (`az login`), plus `kubectl`
+- **Tooling** - either the container (recommended, no installs): `bash common/tools-docker.sh`, or natively: terraform 1.15.8, kubectl v1.36.3, helm v3.22.0, az (latest stable). On Windows run the scripts from **Git Bash**.
+- Azure account + `az` CLI (`az login`)
 - The app repo's GitHub OIDC provider is already trusted (the `main`/`dev` branches mint tokens; the federated credential is created by Terraform)
-- Terraform >= 1.5 (CI uses a pinned docker image, no local install needed)
 - the three images pushed to ghcr.io: `template-api`, `template-react`, `template-db-migrations` (public)
 - the React app reads `API_URL` from an env var at runtime (no per-env builds)
 
@@ -394,7 +465,26 @@ Re-deploying later is: `terraform apply` -> `aws/bootstrap/setup-eks.sh` -> `com
    terraform apply
    ```
 
-   `pg_password` in `terraform.tfvars` MUST equal `DB_PASSWORD` in the Azure secrets (below).
+     `pg_password` in `terraform.tfvars` MUST equal `DB_PASSWORD` in the `dev-azure` environment secrets (below).
+
+     This apply also creates the **tf-plan / tf-apply / CD user-assigned managed identities** (each with a GitHub OIDC federated credential) and exports their client ids. Capture them now - they are the per-env GitHub secrets the CI/CD workflows need, stored under the `dev-azure` environment (see the table below):
+
+     ```sh
+     terraform output -raw cd_client_id         # -> dev-azure secret AZURE_CLIENT_ID
+     terraform output -raw tf_plan_client_id    # -> dev-azure secret AZURE_TF_PLAN_CLIENT_ID
+     terraform output -raw tf_apply_client_id   # -> dev-azure secret AZURE_TF_APPLY_CLIENT_ID
+     ```
+
+2b. **Install ArgoCD** (separate state - reads the cluster from the main state above):
+
+    ```sh
+    cd azure/terraform/environments/dev/argocd
+    cp terraform.tfvars.example terraform.tfvars   # set argocd_repo_token (a GitHub PAT, contents:read on this repo)
+    terraform init
+    terraform apply
+    ```
+
+    This installs ArgoCD and the `Application` that watches `deploy/dev/azure/` on `main`. It is a separate state because the helm/kubernetes providers need the cluster's live API endpoint, which only exists after the main state is applied (see [ArgoCD in its own Terraform state](#argocd-in-its-own-terraform-state-and-why)). From the second apply onward, `apply-infra.yml` runs this automatically from `main`.
 
 3. **Bootstrap the cluster** (kubeconfig + wait nodes + AGIC + the AGIC service principal):
 
@@ -432,20 +522,22 @@ Re-deploying later is: `terraform apply` -> `aws/bootstrap/setup-eks.sh` -> `com
 
 ### Deploy a new build (manual CD)
 
-GitHub -> **Actions** -> **Deploy (Azure)** (`.github/workflows/cd-azure.yml`) -> choose `env` -> **Run workflow**. The workflow authenticates with a **user-assigned managed identity** (created by Terraform) whose federated credential trusts this repo's `main`/`dev` branches, resolves the `sha7` of the app repos' `main` HEAD (or a specific `sha7` from `api_tag` / `react_tag`), resolves the PostgreSQL FQDN + user via the az CLI, renders the env files, and runs `common/k8s/deploy.sh <env> azure`.
+GitHub -> **Actions** -> **Deploy (Azure)** (`.github/workflows/cd-azure.yml`) -> choose `env` -> **Run workflow**. The workflow authenticates with a **user-assigned managed identity** (created by Terraform) whose federated credential trusts this repo's `main`/`dev` branches, resolves the `sha7` of the app repos' `main` HEAD (or a specific `sha7` from `api_tag` / `react_tag`), resolves the PostgreSQL FQDN + user via the az CLI, renders the env files + manifests with `common/k8s/render.sh` into `deploy/<env>/azure/`, and **commits** that to `main`. **ArgoCD** then syncs the commit into the cluster (migrations Job first, via the `PreSync` hook).
 
-Required per environment (repo settings -> Secrets & variables -> Actions):
+Required per environment, stored under the `<env>-azure` GitHub environment (Settings -> Environments -> `<env>-azure` -> Secrets / Variables):
 
-| Type   | Name                     | Value                                                        |
-| ------ | ------------------------ | ------------------------------------------------------------ |
-| Secret | `AZURE_TENANT_ID_DEV`    | tenant id (the one Terraform provisions into, or `terraform output -raw cd_tenant_id`) |
-| Secret | `AZURE_SUBSCRIPTION_ID_DEV` | subscription id                                              |
-| Secret | `AZURE_CLIENT_ID_DEV`    | `terraform output -raw cd_client_id` (the user-assigned MI client id) |
-| Secret | `DB_PASSWORD_DEV`        | PG server password (must match `pg_password` in tfvars)      |
-| Secret | `IMAGE_API_KEY_DEV`      | image API key for this env                                    |
-| Var    | `IMAGE_API_URL_DEV`      | image API base URL for this env                               |
+| Type   | Name                       | Value                                                        |
+| ------ | -------------------------- | ------------------------------------------------------------ |
+| Secret | `AZURE_TENANT_ID`          | tenant id (the one Terraform provisions into, or `terraform output -raw cd_tenant_id`) |
+| Secret | `AZURE_SUBSCRIPTION_ID`    | subscription id                                              |
+| Secret | `AZURE_CLIENT_ID`          | `terraform output -raw cd_client_id` (the CD MI client id)   |
+| Secret | `AZURE_TF_PLAN_CLIENT_ID`  | `terraform output -raw tf_plan_client_id` (terraform-plan job) |
+| Secret | `AZURE_TF_APPLY_CLIENT_ID` | `terraform output -raw tf_apply_client_id` (apply-infra job) |
+| Secret | `DB_PASSWORD`              | PG server password (must match `pg_password` in tfvars)      |
+| Secret | `IMAGE_API_KEY`            | image API key for this env                                    |
+| Var    | `IMAGE_API_URL`            | image API base URL for this env                               |
 
-The identity needs `Reader` on the env resource group + `AKS RBAC Reader` on the cluster (both applied by Terraform via `azure_ad`/`azurerm`). No kubeconfig secret: kubectl authenticates through the cluster's Azure AD.
+The CD identity needs `Reader` on the env resource group + `AKS RBAC Reader` on the cluster (both applied by Terraform via `azure_ad`/`azurerm`). The tf-plan identity gets `Reader` + `AKS Cluster User Role` (to read the kubeconfig for the plan), and tf-apply gets `Contributor` (to run `terraform apply`). No kubeconfig secret: kubectl authenticates through the cluster's Azure AD.
 
 ### Destroy everything (after validation)
 
@@ -461,4 +553,5 @@ The script deletes the `app` namespace, uninstalls AGIC, runs `terraform destroy
 - Single-region, single-node-pool (cheapest). For HA: more nodes / multiple zones.
 - The app connects to PostgreSQL as the admin user (dev). Create a dedicated app user before prod.
 - AGIC (App Gateway Ingress Controller) creates the actual routing rules from the Ingress; the Terraform App Gateway is a minimal shell (a placeholder listener + pool) that AGIC overwrites at runtime.
-- CI/CD never runs `terraform` (only `common/k8s/deploy.sh`). The AGIC service principal is created by `setup-aks.sh` (az CLI), not by Terraform, because recent azurerm versions removed `azurerm_application`/`azurerm_service_principal` from the provider.
+- CI/CD **does** run `terraform` now: `terraform-plan` (read-only, on every PR) and `apply-infra` (apply from `main`, auto for dev/qa, button for prod) both authenticate via GitHub OIDC to the per-env tf-plan / tf-apply user-assigned managed identities (Reader / Contributor on the env resource group, created by Terraform). The very first apply of a brand-new env still runs locally (the tf-apply identity is created by that apply).
+- The AGIC service principal is created by `setup-aks.sh` (az CLI), not by Terraform, because recent azurerm versions removed `azurerm_application`/`azurerm_service_principal` from the provider.
